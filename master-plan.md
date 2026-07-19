@@ -2,7 +2,7 @@
 
 **Current Version**: v1.0.0 (TypeScript/Bun CLI; v1.0 frozen — see `CONTRACT.md`)
 **Last Updated**: July 2026
-**Test Status**: 240 tests passing, typecheck clean
+**Test Status**: 400 tests passing, typecheck clean, `bun build` binary Healthy under bun+node, vendored-offline falkordblite cycle green (M7 final gate)
 **Organizing lens**: Integration readiness (can pickle-rick / an external agent adopt this?), tiered gates.
 
 This is the single source of truth for all pending work on MemoryGraph. It is
