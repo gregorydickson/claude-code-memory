@@ -237,21 +237,25 @@ export class TemporalMemory {
     currentMemoryId: string,
     newMemory: Record<string, unknown>
   ): Promise<string> {
+    // NOTE: FalkorDB v4.16.3 does not implement the Cypher `datetime`
+    // function. Pass ISO 8601 timestamps as plain string params so this
+    // works on the default falkordblite backend. See M14.
+    const nowIso = new Date().toISOString();
     const query = `
       MATCH (current:Memory {id: $current_id})
       CREATE (new:Memory)
       SET new = $new_props,
           new.id = randomUUID(),
-          new.created_at = datetime(),
-          new.updated_at = datetime(),
+          new.created_at = $now,
+          new.updated_at = $now,
           new.is_current = true,
           current.is_current = false,
           current.superseded_by = new.id
-      CREATE (new)-[:PREVIOUS {superseded_at: datetime()}]->(current)
+      CREATE (new)-[:PREVIOUS {superseded_at: $now}]->(current)
       RETURN new.id as new_id
     `;
 
-    const params = { current_id: currentMemoryId, new_props: newMemory };
+    const params = { current_id: currentMemoryId, new_props: newMemory, now: nowIso };
 
     try {
       const results = await this.backend.executeQuery(query, params, true);

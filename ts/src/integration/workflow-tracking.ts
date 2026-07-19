@@ -139,14 +139,19 @@ export async function trackWorkflow(
 
   // Create or get session entity
   try {
+    // NOTE: FalkorDB v4.16.3 does not implement the Cypher `datetime`
+    // function. Pass ISO 8601 timestamps as plain string params so this
+    // works on the default falkordblite backend (and on falkordb / Neo4j /
+    // Memgraph, which also accept string timestamps). See M14 / VAL-LOCAL-059.
+    const nowIso = new Date().toISOString();
     await backend.executeQuery(
       `
       MERGE (s:Entity {id: $session_id, type: 'session'})
-      ON CREATE SET s.created_at = datetime(), s.start_time = datetime()
-      SET s.last_activity = datetime()
+      ON CREATE SET s.created_at = $now, s.start_time = $now
+      SET s.last_activity = $now
       RETURN s.id as id
       `,
-      { session_id: sessionId },
+      { session_id: sessionId, now: nowIso },
       true
     );
 

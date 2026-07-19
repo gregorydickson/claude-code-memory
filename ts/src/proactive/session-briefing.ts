@@ -234,7 +234,7 @@ export async function generateSessionBriefing(
   const recentQuery = `
     MATCH (m:Memory)
     WHERE (m.context_project_path = $project_path OR m.context_project_path CONTAINS $project_name)
-      AND datetime(m.created_at) >= datetime($cutoff)
+      AND m.created_at >= $cutoff
     RETURN m.id as id, m.type as type, m.title as title,
            m.summary as summary, m.created_at as created_at,
            m.tags as tags

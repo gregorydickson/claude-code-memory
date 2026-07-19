@@ -67,7 +67,7 @@ export async function recordOutcome(
 
   const outcomeId = `outcome_${randomUUID()}`;
 
-  // NOTE: FalkorDB's Cypher engine does not implement the `datetime()`
+  // NOTE: FalkorDB's Cypher engine does not implement the `datetime`
   // function. We pass the ISO 8601 timestamp as a plain string param and
   // store it as a string property. This keeps `outcome` working on the
   // default falkordblite backend (VAL-LOCAL-030) and on falkordb; Neo4j /

@@ -350,22 +350,27 @@ export async function linkEntities(
 ): Promise<string[]> {
   const entityIds: string[] = [];
 
+  // NOTE: FalkorDB v4.16.3 does not implement the Cypher `datetime`
+  // function. Pass ISO 8601 timestamps as plain string params so this
+  // works on the default falkordblite backend. See M14 / VAL-LOCAL-058.
+  const nowIso = new Date().toISOString();
+
   for (const entity of entities) {
     const query = `
       MERGE (e:Entity {text: $text, type: $type})
       ON CREATE SET
         e.id = randomUUID(),
-        e.created_at = datetime(),
+        e.created_at = $now,
         e.occurrence_count = 1
       ON MATCH SET
         e.occurrence_count = e.occurrence_count + 1,
-        e.last_seen = datetime()
+        e.last_seen = $now
       WITH e
       MATCH (m:Memory {id: $memory_id})
       MERGE (m)-[r:MENTIONS]->(e)
       ON CREATE SET
         r.confidence = $confidence,
-        r.created_at = datetime()
+        r.created_at = $now
       RETURN e.id as entity_id
     `;
 
@@ -374,6 +379,7 @@ export async function linkEntities(
       type: entity.entity_type,
       memory_id: memoryId,
       confidence: entity.confidence,
+      now: nowIso,
     };
 
     try {

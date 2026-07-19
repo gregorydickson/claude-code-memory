@@ -148,16 +148,20 @@ export async function captureTaskContext(
   const memoryId = await backend.storeMemory(memory);
 
   // Create relationships to file entities
+  // NOTE: FalkorDB v4.16.3 does not implement the Cypher `datetime`
+  // function. Pass ISO 8601 timestamps as plain string params so this
+  // works on the default falkordblite backend. See M14 / VAL-LOCAL-060.
+  const nowIso = new Date().toISOString();
   for (const filePath of cleanFiles) {
     const fileId = randomUUID();
     try {
       await backend.executeQuery(
         `
         MERGE (f:Entity {name: $file_path, type: 'file'})
-        ON CREATE SET f.id = $file_id, f.created_at = datetime()
+        ON CREATE SET f.id = $file_id, f.created_at = $now
         RETURN f.id as id
         `,
-        { file_path: filePath, file_id: fileId },
+        { file_path: filePath, file_id: fileId, now: nowIso },
         true
       );
       await backend.createRelationship(
@@ -310,10 +314,10 @@ export async function analyzeErrorPatterns(
           await backend.executeQuery(
             `
             MATCH (m:Memory {id: $pattern_id})
-            SET m.updated_at = datetime()
+            SET m.updated_at = $now
             RETURN m.id as id
             `,
-            { pattern_id: patternId },
+            { pattern_id: patternId, now: new Date().toISOString() },
             true
           );
         } catch (err) {
@@ -388,24 +392,25 @@ export async function trackSolutionEffectiveness(
 
   // Update error pattern with solution info via Cypher
   try {
+    const nowIso = new Date().toISOString();
     if (success) {
       await backend.executeQuery(
         `
         MATCH (m:Memory {id: $pattern_id})
-        SET m.updated_at = datetime()
+        SET m.updated_at = $now
         RETURN m.id as id
         `,
-        { pattern_id: errorPatternId, solution_id: solutionMemoryId },
+        { pattern_id: errorPatternId, solution_id: solutionMemoryId, now: nowIso },
         true
       );
     } else {
       await backend.executeQuery(
         `
         MATCH (m:Memory {id: $pattern_id})
-        SET m.updated_at = datetime()
+        SET m.updated_at = $now
         RETURN m.id as id
         `,
-        { pattern_id: errorPatternId, solution_id: solutionMemoryId },
+        { pattern_id: errorPatternId, solution_id: solutionMemoryId, now: nowIso },
         true
       );
     }
@@ -421,10 +426,10 @@ export async function trackSolutionEffectiveness(
       MATCH (s)-[r:SOLVES|ATTEMPTED_SOLUTION]->(e:Memory {type: 'error'})
       WITH s, COUNT(r) as total_attempts,
            SUM(CASE WHEN type(r) = 'SOLVES' THEN 1 ELSE 0 END) as successes
-      SET s.updated_at = datetime()
+      SET s.updated_at = $now
       RETURN s.id as id
       `,
-      { solution_id: solutionMemoryId },
+      { solution_id: solutionMemoryId, now: new Date().toISOString() },
       true
     );
   } catch (err) {

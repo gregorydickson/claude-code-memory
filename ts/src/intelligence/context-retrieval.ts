@@ -85,37 +85,48 @@ export class ContextRetriever {
     // Extract keywords for fallback matching
     const keywords = this.extractKeywords(query);
 
+    // NOTE: FalkorDB v4.16.3 does not implement the Cypher `datetime`
+    // function, so the old `duration.between(m.created_at, datetime ...)` /
+    // `datetime - duration(...)` expressions threw on the default
+    // falkordblite backend and the whole query degraded to empty results.
+    // It also does not support `size([x IN list WHERE exists(...)])` list
+    // comprehensions with pattern expressions inside a WITH clause. So we
+    // compute entity/keyword match counts and the recency-decayed relevance
+    // score entirely in JS from the returned rows. See M14 / VAL-LOCAL-057.
+    const nowMs = Date.now();
+
+    // FalkorDB v4.16.3 does not support `exists()` pattern expressions
+    // inside `any()` list comprehensions, nor the `EXISTS { MATCH ... }`
+    // subquery syntax. So we use a proper JOIN for entity matching:
+    // separately MATCH keyword-matched memories, then OPTIONAL MATCH
+    // entity-MENTIONS-matched memories, concatenate the lists, UNWIND, and
+    // deduplicate. The OPTIONAL MATCH is critical: a plain second MATCH
+    // would eliminate the keyword-matched row when no entities match.
+    // See M14 / VAL-LOCAL-057.
     const searchQuery = `
-      // Find memories matching entities or keywords
+      // Keyword-matched memories
       MATCH (m:Memory)
-      WHERE (
-        any(entity IN $entities WHERE
-          exists((m)-[:MENTIONS]->(:Entity {text: entity}))
-        )
-        OR
-        any(keyword IN $keywords WHERE
-          toLower(m.content) CONTAINS keyword OR
-          toLower(m.title) CONTAINS keyword
-        )
-      )
-      WITH m
-      WHERE $project IS NULL OR $project IN m.tags
+      WHERE any(keyword IN $keywords WHERE
+        toLower(m.content) CONTAINS keyword OR
+        toLower(m.title) CONTAINS keyword)
+        AND ($project IS NULL OR $project IN m.tags)
+      WITH collect(DISTINCT m) as kw_mem
 
-      WITH m,
-        size([entity IN $entities WHERE
-              exists((m)-[:MENTIONS]->(:Entity {text: entity}))]) as entity_matches,
-        size([keyword IN $keywords WHERE
-              toLower(m.content) CONTAINS keyword OR
-              toLower(m.title) CONTAINS keyword]) as keyword_matches,
-        duration.between(m.created_at, datetime()).days as age_days
+      // Entity-matched memories (OPTIONAL JOIN so keyword matches survive
+      // even when no entities are linked).
+      OPTIONAL MATCH (em:Memory)-[:MENTIONS]->(e:Entity)
+      WHERE e.text IN $entities
+        AND ($project IS NULL OR $project IN em.tags)
+      WITH kw_mem, collect(DISTINCT em) as ent_mem
 
-      WITH m, entity_matches, keyword_matches, age_days,
-        toFloat(entity_matches * 3 + keyword_matches * 2) /
-        (1.0 + age_days / 30.0) as relevance_score
+      // Combine + deduplicate (collect() skips nulls from OPTIONAL MATCH)
+      WITH kw_mem + ent_mem as all_mem
+      UNWIND all_mem as m
+      WITH DISTINCT m
 
       OPTIONAL MATCH (m)-[r]->(related:Memory)
       WHERE type(r) IN ['SOLVES', 'BUILDS_ON', 'REQUIRES', 'RELATED_TO']
-      WITH m, relevance_score,
+      WITH m,
         collect(DISTINCT {
           id: related.id,
           title: related.title,
@@ -123,7 +134,7 @@ export class ContextRetriever {
           rel_strength: coalesce(r.strength, 0.5)
         }) as related_memories
 
-      ORDER BY relevance_score DESC, m.created_at DESC
+      ORDER BY m.created_at DESC
       LIMIT 20
 
       RETURN m.id as id,
@@ -132,9 +143,6 @@ export class ContextRetriever {
              m.type as memory_type,
              m.tags as tags,
              m.created_at as created_at,
-             relevance_score,
-             entity_matches,
-             keyword_matches,
              related_memories
     `;
 
@@ -151,8 +159,64 @@ export class ContextRetriever {
       const sourceMemories: SourceMemory[] = [];
       let estimatedTokens = 0;
 
+      const entityTextsLower = entityTexts.map((e) => e.toLowerCase());
+
+      // First pass: compute per-memory relevance score in JS.
+      const scored: Array<{
+        record: Record<string, unknown>;
+        relevance: number;
+      }> = [];
       for (const record of results) {
-        const memorySummary = this.formatMemory(record);
+        const content = (record["content"] as string | null | undefined) ?? "";
+        const title = (record["title"] as string | null | undefined) ?? "";
+        const contentLower = content.toLowerCase();
+        const titleLower = title.toLowerCase();
+
+        // Entity matches: count how many query entities this memory
+        // MENTIONS. We approximate by checking the memory's content/title
+        // contain the entity text, since re-querying per-memory would be
+        // an N+1. The WHERE clause already ensured at least one entity or
+        // keyword matched; this refines the score.
+        let entityMatches = 0;
+        for (const entity of entityTextsLower) {
+          if (contentLower.includes(entity) || titleLower.includes(entity)) {
+            entityMatches++;
+          }
+        }
+
+        // Keyword matches.
+        let keywordMatches = 0;
+        for (const kw of keywords) {
+          const kl = kw.toLowerCase();
+          if (contentLower.includes(kl) || titleLower.includes(kl)) {
+            keywordMatches++;
+          }
+        }
+
+        const createdAtRaw = record["created_at"] as string | null | undefined;
+        const createdAtMs = createdAtRaw ? new Date(createdAtRaw).getTime() : nowMs;
+        const ageDays = Math.max(0, (nowMs - createdAtMs) / (1000 * 60 * 60 * 24));
+        const rawScore = entityMatches * 3 + keywordMatches * 2;
+        const relevance = rawScore / (1.0 + ageDays / 30.0);
+
+        scored.push({ record, relevance });
+      }
+
+      // Sort by relevance (desc), then created_at (desc) — matches the
+      // original Cypher ORDER BY relevance_score DESC, m.created_at DESC.
+      scored.sort((a, b) => {
+        if (b.relevance !== a.relevance) return b.relevance - a.relevance;
+        const aCreated = new Date(
+          (a.record["created_at"] as string | null | undefined) ?? nowMs
+        ).getTime();
+        const bCreated = new Date(
+          (b.record["created_at"] as string | null | undefined) ?? nowMs
+        ).getTime();
+        return bCreated - aCreated;
+      });
+
+      for (const { record, relevance } of scored) {
+        const memorySummary = this.formatMemory({ ...record, relevance_score: relevance });
         const memoryTokens = this.estimateTokens(memorySummary);
 
         if (estimatedTokens + memoryTokens > maxTokens) {
@@ -163,7 +227,7 @@ export class ContextRetriever {
         sourceMemories.push({
           id: String(record["id"] ?? ""),
           title: (record["title"] as string | null | undefined) ?? null,
-          relevance: Number(record["relevance_score"] ?? 0),
+          relevance,
         });
         estimatedTokens += memoryTokens;
       }
@@ -193,6 +257,10 @@ export class ContextRetriever {
    * Get comprehensive overview of a project.
    */
   async getProjectContext(project: string): Promise<ProjectSummary> {
+    // NOTE: FalkorDB v4.16.3 does not implement the Cypher `datetime` or
+    // `duration` functions. Compute the recency cutoff in JS as an ISO 8601
+    // string and compare strings in-Cypher. See M14.
+    const recentCutoffIso = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
     const query = `
       MATCH (m:Memory)
       WHERE $project IN m.tags
@@ -203,7 +271,7 @@ export class ContextRetriever {
       WITH collect(m) as all_memories
 
       WITH all_memories,
-        [m IN all_memories WHERE m.created_at >= datetime() - duration({days: 7})][..10] as recent,
+        [m IN all_memories WHERE m.created_at >= $recent_cutoff][..10] as recent,
         [m IN all_memories WHERE m.type = 'decision'][..5] as decisions,
         [m IN all_memories WHERE m.type = 'problem' AND
          NOT exists((m)<-[:SOLVES]-(:Memory))][..5] as open_problems,
@@ -235,7 +303,7 @@ export class ContextRetriever {
       } as project_summary
     `;
 
-    const params = { project };
+    const params = { project, recent_cutoff: recentCutoffIso };
 
     try {
       const results = await this.backend.executeQuery(query, params, false);
@@ -263,9 +331,13 @@ export class ContextRetriever {
    * Get recent session context from the last N hours.
    */
   async getSessionContext(hoursBack = 24, limit = 10): Promise<SessionContext> {
+    // NOTE: FalkorDB v4.16.3 does not implement the Cypher `datetime` or
+    // `duration` functions. Compute the recency cutoff in JS as an ISO 8601
+    // string and compare strings in-Cypher. See M14.
+    const cutoffIso = new Date(Date.now() - hoursBack * 60 * 60 * 1000).toISOString();
     const query = `
       MATCH (m:Memory)
-      WHERE m.created_at >= datetime() - duration({hours: $hours_back})
+      WHERE m.created_at >= $cutoff
 
       WITH m
       ORDER BY m.created_at DESC
@@ -283,7 +355,7 @@ export class ContextRetriever {
       ORDER BY m.created_at DESC
     `;
 
-    const params = { hours_back: hoursBack, limit };
+    const params = { cutoff: cutoffIso, limit };
 
     try {
       const results = await this.backend.executeQuery(query, params, false);
