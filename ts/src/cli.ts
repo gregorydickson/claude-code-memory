@@ -392,6 +392,27 @@ export async function main(): Promise<void> {
   // never-throw wrapper) rather than bypassing it and being printed as a
   // raw `err.message` by the bottom `main().catch`. This keeps SEC-5
   // generic surfacing intact for guard violations too.
+  //
+  // M7 part 3 bottom-catch consistency: the bottom `main().catch` (at the
+  // end of this file) ALSO routes through `surfaceGenericError` so ANY
+  // error that escapes this inner try/catch (e.g. a throw in the
+  // arg-parsing / option-extraction code above, or a hypothetical bug in
+  // the catch arm itself) is surfaced generically with the full error
+  // debug-logged — never as a raw `Fatal: ${err.message}`.
+
+  // TEST-ONLY injection hook: when
+  // MEMORYGRAPH_TEST_INJECT_BOTTOM_CATCH_THROW=1 is set, throw a synthetic
+  // error (with a SECRET payload) BEFORE the main try/catch so `main()`
+  // rejects and the bottom `main().catch` fires. Used by
+  // tests/bottom-catch-never-throw.test.ts (VAL-P2-008) to assert the
+  // bottom catch surfaces a generic message (no raw err.message / SECRET /
+  // stack) and debug-logs the full error. This hook is never active in
+  // normal operation.
+  if (process.env.MEMORYGRAPH_TEST_INJECT_BOTTOM_CATCH_THROW === "1") {
+    throw new Error(
+      "bottom-catch test: synthetic pre-try throw — SECRET=hunter2, token=abc123"
+    );
+  }
 
   try {
     assertAutoModeSafe(command);
@@ -1643,7 +1664,15 @@ const isEntry = (() => {
 
 if (isEntry) {
   main().catch((err) => {
-    console.error(`Fatal: ${err instanceof Error ? err.message : String(err)}`);
+    // Never-throw at the FINAL bottom-catch boundary (SEC-5 / AGENTS.md
+    // normative rule): surface a generic message and debug-log the full
+    // error. No raw `err.message` / stack is ever printed directly. This
+    // is the defense-in-depth net for ANY error that escapes main()'s
+    // inner try/catch (e.g. a throw in the arg-parsing / option-extraction
+    // code that runs before the try block, or a hypothetical bug in the
+    // catch arm itself).
+    const generic = surfaceGenericError("CLI entry (bottom catch)", err);
+    eprint(generic);
     process.exit(1);
   });
 }
