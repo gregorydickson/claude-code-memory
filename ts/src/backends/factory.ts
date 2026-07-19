@@ -289,4 +289,7 @@ class ThrowingBackend implements GraphBackend {
   async getRecentActivity(_days?: number, _project?: string | null): Promise<Record<string, unknown>> {
     this.boom();
   }
+  async getRelationshipsSince(_since: Date): Promise<Relationship[]> {
+    this.boom();
+  }
 }

@@ -80,6 +80,15 @@ const _handleGetRecentActivity = handleToolErrors(
 
     text += `**Total Memories**: ${activity["total_count"]}\n\n`;
 
+    // VAL-LOCAL-015: surface the LIMIT 50 / LIMIT 20 silent caps with a clear
+    // message instead of silently truncating. Backends that detect a cap
+    // populate `cap_message`; we render it verbatim so the user knows the
+    // feed is truncated and how many total entries exist beyond the cap.
+    const capMessage = activity["cap_message"] as string | null | undefined;
+    if (capMessage) {
+      text += `**Note**: ${capMessage}\n\n`;
+    }
+
     const byType = activity["memories_by_type"] as Record<string, number> | undefined;
     if (byType) {
       text += "**Breakdown by Type**:\n";

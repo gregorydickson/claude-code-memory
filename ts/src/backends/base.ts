@@ -68,6 +68,11 @@ export interface GraphBackend {
   // Recent activity (optional, not all backends support it)
   getRecentActivity?(days?: number, project?: string | null): Promise<Record<string, unknown>>;
 
+  // Relationships recorded since a timestamp (used by `changes`/what-changed).
+  // M12 (VAL-LOCAL-014): replaces the N+1 per-memory query + implicit 1000-cap
+  // with a single backend query filtering relationships by recorded_at >= since.
+  getRelationshipsSince?(since: Date): Promise<Relationship[]>;
+
   // Backend-specific search (optional, for cloud backend)
   recallMemories?(
     query: string,

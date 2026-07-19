@@ -44,6 +44,7 @@ export interface IMemoryDatabase {
   ): Promise<[Memory, Relationship][]>;
   getMemoryStatistics(): Promise<Record<string, unknown>>;
   getRecentActivity?(days?: number, project?: string | null): Promise<Record<string, unknown>>;
+  getRelationshipsSince?(since: Date): Promise<Relationship[]>;
 }
 
 /**
@@ -149,6 +150,20 @@ export class MemoryDatabase implements IMemoryDatabase {
       project,
     };
   }
+
+  /**
+   * M12 (VAL-LOCAL-014): single backend query filtering relationships by
+   * `recorded_at >= since`. Replaces the N+1 per-memory loop in
+   * `handleWhatChanged` (which also implicitly capped at 1000 memories via
+   * `searchMemories({limit: 1000})`). Backends that do not implement this
+   * method yield an empty list (cloud is out of scope).
+   */
+  async getRelationshipsSince(since: Date): Promise<Relationship[]> {
+    if (this.backend.getRelationshipsSince) {
+      return this.backend.getRelationshipsSince(since);
+    }
+    return [];
+  }
 }
 
 /**
@@ -240,5 +255,12 @@ export class CloudMemoryDatabase implements IMemoryDatabase {
       days,
       project,
     };
+  }
+
+  async getRelationshipsSince(since: Date): Promise<Relationship[]> {
+    if (this.backend.getRelationshipsSince) {
+      return this.backend.getRelationshipsSince(since);
+    }
+    return [];
   }
 }

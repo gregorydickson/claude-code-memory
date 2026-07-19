@@ -307,16 +307,26 @@ export class SQLiteBackend implements GraphBackend {
     }
 
     if (searchQuery.tags.length > 0) {
-      const tagConditions = searchQuery.tags.map(() => "tags LIKE ?").join(" OR ");
+      // SEC-10 (VAL-LOCAL-016): escape `%` and `_` wildcards in the
+      // user-supplied tag values so they are matched literally, not as
+      // SQL LIKE wildcards. Without this, a tag like "50%_off" would also
+      // match "50xoff" (because `%` matches "x" and `_` matches "").
+      // We keep the OUTER `%` wildcards (intentional prefix/suffix match
+      // against the JSON blob) but escape any `%`/`_` inside the tag.
+      const tagConditions = searchQuery.tags.map(() => "tags LIKE ? ESCAPE '\\'").join(" OR ");
       conditions.push(`(${tagConditions})`);
       for (const tag of searchQuery.tags) {
-        params.push(`%"${tag}"%`);
+        params.push(`%"${escapeLikeLiteral(tag)}"%`);
       }
     }
 
     if (searchQuery.project_path) {
-      conditions.push("context LIKE ?");
-      params.push(`%"project_path":"${searchQuery.project_path}"%`);
+      // SEC-10 (VAL-LOCAL-016): escape `%` and `_` wildcards in the
+      // user-supplied project_path so it is matched literally inside the
+      // JSON context blob. The outer `%` wildcards (intentional) are
+      // preserved; only the interpolated project_path portion is escaped.
+      conditions.push("context LIKE ? ESCAPE '\\'");
+      params.push(`%"project_path":"${escapeLikeLiteral(searchQuery.project_path)}"%`);
     }
 
     if (searchQuery.min_importance !== undefined && searchQuery.min_importance !== null) {
@@ -575,11 +585,24 @@ export class SQLiteBackend implements GraphBackend {
     cutoff.setDate(cutoff.getDate() - days);
     const cutoffIso = cutoff.toISOString();
 
+    // VAL-LOCAL-015: surface the LIMIT 50 / LIMIT 20 silent caps with a
+    // clear message instead of silently truncating. We fetch the true
+    // totals with cheap COUNT(*) queries and compare them to the capped
+    // returned counts, then emit a human-readable `cap_message` the
+    // activity handler surfaces in its output.
+    const RECENT_CAP = 50;
+    const UNRESOLVED_CAP = 20;
+
     const recentRows = this.db
-      .prepare("SELECT * FROM memories WHERE created_at >= ? ORDER BY created_at DESC LIMIT 50")
-      .all(cutoffIso) as Record<string, unknown>[];
+      .prepare("SELECT * FROM memories WHERE created_at >= ? ORDER BY created_at DESC LIMIT ?")
+      .all(cutoffIso, RECENT_CAP) as Record<string, unknown>[];
 
     const recentMemories = recentRows.map(rowToMemory).filter((m): m is Memory => m !== null);
+
+    const recentTotalRow = this.db
+      .prepare("SELECT COUNT(*) as count FROM memories WHERE created_at >= ?")
+      .get(cutoffIso) as Record<string, number>;
+    const recentTotal = recentTotalRow["count"] ?? 0;
 
     const byType: Record<string, number> = {};
     for (const mem of recentMemories) {
@@ -592,20 +615,89 @@ export class SQLiteBackend implements GraphBackend {
         `SELECT m.* FROM memories m
          WHERE m.type = 'problem'
          AND m.id NOT IN (SELECT to_id FROM relationships WHERE rel_type = 'SOLVES')
-         ORDER BY m.importance DESC LIMIT 20`
+         ORDER BY m.importance DESC LIMIT ?`
       )
-      .all() as Record<string, unknown>[];
+      .all(UNRESOLVED_CAP) as Record<string, unknown>[];
 
     const unresolvedProblems = problemRows.map(rowToMemory).filter((m): m is Memory => m !== null);
+
+    const unresolvedTotalRow = this.db
+      .prepare(
+        `SELECT COUNT(*) as count FROM memories m
+         WHERE m.type = 'problem'
+         AND m.id NOT IN (SELECT to_id FROM relationships WHERE rel_type = 'SOLVES')`
+      )
+      .get() as Record<string, number>;
+    const unresolvedTotal = unresolvedTotalRow["count"] ?? 0;
+
+    const recentCapped = recentTotal > recentMemories.length;
+    const unresolvedCapped = unresolvedTotal > unresolvedProblems.length;
+
+    const capParts: string[] = [];
+    if (recentCapped) {
+      capParts.push(
+        `Recent memories capped at ${RECENT_CAP} (${recentTotal} total in the last ${days} days)`
+      );
+    }
+    if (unresolvedCapped) {
+      capParts.push(
+        `Unresolved problems capped at ${UNRESOLVED_CAP} (${unresolvedTotal} total)`
+      );
+    }
+    const capMessage = capParts.length > 0 ? capParts.join("; ") : null;
 
     return {
       total_count: recentMemories.length,
       memories_by_type: byType,
       recent_memories: recentMemories,
+      recent_memories_total: recentTotal,
+      recent_memories_capped: recentCapped,
       unresolved_problems: unresolvedProblems,
+      unresolved_problems_total: unresolvedTotal,
+      unresolved_problems_capped: unresolvedCapped,
+      cap_message: capMessage,
       days,
       project,
     };
+  }
+
+  /**
+   * M12 (VAL-LOCAL-014): single SQL query filtering relationships by
+   * `recorded_at >= ?`. Replaces the N+1 per-memory loop in
+   * `handleWhatChanged` (which also implicitly capped at 1000 memories via
+   * `searchMemories({limit: 1000})`). Returns the full matching set with no
+   * truncation.
+   */
+  async getRelationshipsSince(since: Date): Promise<Relationship[]> {
+    if (!this.db) throw new DatabaseConnectionError("Not connected");
+    const sinceIso = since instanceof Date ? since.toISOString() : String(since);
+    const rows = this.db
+      .prepare("SELECT * FROM relationships WHERE recorded_at >= ? ORDER BY recorded_at ASC")
+      .all(sinceIso) as unknown as RelRow[];
+
+    const relationships: Relationship[] = [];
+    for (const row of rows) {
+      const props = createRelationshipProperties({
+        strength: row.strength,
+        confidence: row.confidence,
+        context: row.context ?? undefined,
+        evidence_count: row.evidence_count,
+        valid_from: row.valid_from,
+        valid_until: row.valid_until ?? undefined,
+        recorded_at: row.recorded_at,
+        invalidated_by: row.invalidated_by ?? undefined,
+      });
+      relationships.push({
+        id: row.id,
+        from_memory_id: row.from_id,
+        to_memory_id: row.to_id,
+        type: row.rel_type,
+        properties: props,
+        description: undefined,
+        bidirectional: false,
+      });
+    }
+    return relationships;
   }
 
   async recallMemories(
@@ -642,6 +734,18 @@ export class SQLiteBackend implements GraphBackend {
 
 function toIso(value: string | Date): string {
   return value instanceof Date ? value.toISOString() : value;
+}
+
+/**
+ * SEC-10 (VAL-LOCAL-016): escape `%`, `_`, and `\` (the escape char itself)
+ * in a literal substring that will be interpolated into a SQLite LIKE
+ * pattern. Used with the `ESCAPE '\'` clause so user-supplied tag and
+ * project_path values are matched literally, not as SQL LIKE wildcards.
+ *
+ * Example: `50%_off` → `50\%\_off` (matched literally by `LIKE '%50\%\_off%' ESCAPE '\'`).
+ */
+function escapeLikeLiteral(s: string): string {
+  return s.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
 }
 
 function rowToMemory(row: Record<string, unknown>): Memory | null {

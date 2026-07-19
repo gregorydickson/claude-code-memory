@@ -515,14 +515,22 @@ export abstract class BaseBoltBackend implements GraphBackend {
         relFilter = `:${relTypes.join("|")}`;
       }
 
+      // M6 (VAL-LOCAL-013): use startNode(rel)/endNode(rel) so the
+      // relationship direction is taken from the actual stored edge, NOT
+      // always `from_memory_id: memoryId`. (Mirrors the falkordb-shared fix.)
+      // Extract the first rel via `relationships(path)[0]` for driver
+      // compatibility (varpath `r[0]` indexing is unreliable across
+      // Cypher engines).
       const query = `
         MATCH (start:Memory {id: $memory_id})
-        MATCH (start)-[r${relFilter}*1..${maxDepth}]-(related:Memory)
+        MATCH path = (start)-[r${relFilter}*1..${maxDepth}]-(related:Memory)
         WHERE related.id <> start.id
-        WITH DISTINCT related, r[0] as rel
+        WITH DISTINCT related, relationships(path)[0] as rel
         RETURN related,
                type(rel) as rel_type,
-               properties(rel) as rel_props
+               properties(rel) as rel_props,
+               startNode(rel).id as from_id,
+               endNode(rel).id as to_id
         ORDER BY rel.strength DESC, related.importance DESC
         LIMIT 20
       `;
@@ -540,16 +548,23 @@ export abstract class BaseBoltBackend implements GraphBackend {
         const relTypeStr = (record["rel_type"] as string) ?? "RELATED_TO";
         const relProps = (record["rel_props"] as Record<string, unknown>) ?? {};
 
+        const fromId = (record["from_id"] as string) ?? memoryId;
+        const toId = (record["to_id"] as string) ?? mem.id!;
+
         const relationship: Relationship = {
           id: (relProps["id"] as string) ?? null,
-          from_memory_id: memoryId,
-          to_memory_id: mem.id!,
+          from_memory_id: fromId,
+          to_memory_id: toId,
           type: relTypeStr,
           properties: createRelationshipProperties({
             strength: toNumber(relProps["strength"] ?? 0.5),
             confidence: toNumber(relProps["confidence"] ?? 0.8),
             context: (relProps["context"] as string) ?? undefined,
             evidence_count: toNumber(relProps["evidence_count"] ?? 1),
+            valid_from: relProps["valid_from"] as string | undefined,
+            valid_until: relProps["valid_until"] as string | undefined,
+            recorded_at: relProps["recorded_at"] as string | undefined,
+            invalidated_by: relProps["invalidated_by"] as string | undefined,
           }),
           description: null,
           bidirectional: false,
@@ -613,5 +628,56 @@ export abstract class BaseBoltBackend implements GraphBackend {
   }
   isCypherCapable(): boolean {
     return true;
+  }
+
+  // -----------------------------------------------------------------------
+  // Bi-temporal change feed (M12 / VAL-LOCAL-014)
+  // -----------------------------------------------------------------------
+
+  /**
+   * Single Cypher query filtering relationships by `recorded_at >= $since`.
+   * Mirrors the falkordb-shared implementation.
+   */
+  async getRelationshipsSince(since: Date): Promise<Relationship[]> {
+    try {
+      const sinceIso = since instanceof Date ? since.toISOString() : String(since);
+      const query = `
+        MATCH (from:Memory)-[r]->(to:Memory)
+        WHERE r.recorded_at >= $since
+        RETURN r.id as id, type(r) as rel_type, properties(r) as rel_props,
+               from.id as from_id, to.id as to_id
+        ORDER BY r.recorded_at ASC
+      `;
+      const result = await this.executeQuery(query, { since: sinceIso }, false);
+
+      const relationships: Relationship[] = [];
+      for (const record of result) {
+        const relProps = (record["rel_props"] as Record<string, unknown>) ?? {};
+        const relTypeStr = (record["rel_type"] as string) ?? "RELATED_TO";
+        relationships.push({
+          id: (relProps["id"] as string) ?? null,
+          from_memory_id: (record["from_id"] as string) ?? "",
+          to_memory_id: (record["to_id"] as string) ?? "",
+          type: relTypeStr,
+          properties: createRelationshipProperties({
+            strength: toNumber(relProps["strength"] ?? 0.5),
+            confidence: toNumber(relProps["confidence"] ?? 0.8),
+            context: (relProps["context"] as string) ?? undefined,
+            evidence_count: toNumber(relProps["evidence_count"] ?? 1),
+            valid_from: relProps["valid_from"] as string | undefined,
+            valid_until: relProps["valid_until"] as string | undefined,
+            recorded_at: relProps["recorded_at"] as string | undefined,
+            invalidated_by: relProps["invalidated_by"] as string | undefined,
+          }),
+          description: null,
+          bidirectional: false,
+        });
+      }
+      return relationships;
+    } catch (err) {
+      if (err instanceof DatabaseConnectionError) throw err;
+      console.error(`Failed to get relationships since ${since}: ${err}`);
+      throw new DatabaseConnectionError(`Failed to get relationships since: ${err}`);
+    }
   }
 }

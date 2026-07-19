@@ -162,55 +162,35 @@ export const handleWhatChanged = neverThrowBoundary(
       return `Invalid timestamp format. Expected ISO 8601 (e.g., '2024-12-01T00:00:00Z'), got: ${sinceStr}`;
     }
 
-    // Get all memories and their relationships, filter by recorded_at
-    const allMemories = await db.searchMemories({
-      query: undefined,
-      terms: [],
-      memory_types: [],
-      tags: [],
-      project_path: undefined,
-      languages: [],
-      frameworks: [],
-      min_importance: undefined,
-      min_confidence: undefined,
-      min_effectiveness: undefined,
-      created_after: undefined,
-      created_before: undefined,
-      limit: 1000,
-      offset: 0,
-      include_relationships: true,
-      search_tolerance: "normal",
-      match_mode: "any",
-      relationship_filter: undefined,
-    });
+    // M12 (VAL-LOCAL-014): issue a SINGLE backend query filtering
+    // relationships by `recorded_at >= $since`. The previous implementation
+    // searched memories with `searchMemories({limit: 1000})` then called
+    // `getRelatedMemories` per memory (N+1) — both the implicit 1000-cap and
+    // the N+1 fan-out silently truncated / scaled badly. The new path
+    // returns the full matching set with no truncation.
+    const allRelationships = db.getRelationshipsSince
+      ? await db.getRelationshipsSince(since)
+      : [];
 
     const newRelationships: Relationship[] = [];
     const invalidatedRelationships: Relationship[] = [];
     const seenRelIds = new Set<string>();
 
-    for (const mem of allMemories) {
-      if (!mem.id) continue;
-      try {
-        const related = await db.getRelatedMemories(mem.id, { maxDepth: 1 });
-        for (const [, rel] of related) {
-          const relId = rel.id ?? `${rel.from_memory_id}-${rel.to_memory_id}-${rel.type}`;
-          if (seenRelIds.has(relId)) continue;
-          seenRelIds.add(relId);
+    for (const rel of allRelationships) {
+      const relId = rel.id ?? `${rel.from_memory_id}-${rel.to_memory_id}-${rel.type}`;
+      if (seenRelIds.has(relId)) continue;
+      seenRelIds.add(relId);
 
-          const recordedAt = new Date(rel.properties.recorded_at);
-          if (recordedAt >= since) {
-            newRelationships.push(rel);
-          }
+      const recordedAt = new Date(rel.properties.recorded_at);
+      if (recordedAt >= since) {
+        newRelationships.push(rel);
+      }
 
-          if (rel.properties.valid_until) {
-            const validUntil = new Date(rel.properties.valid_until);
-            if (validUntil >= since) {
-              invalidatedRelationships.push(rel);
-            }
-          }
+      if (rel.properties.valid_until) {
+        const validUntil = new Date(rel.properties.valid_until);
+        if (validUntil >= since) {
+          invalidatedRelationships.push(rel);
         }
-      } catch {
-        // skip memories with errors
       }
     }
 

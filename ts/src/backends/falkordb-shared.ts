@@ -473,18 +473,31 @@ export abstract class BaseFalkorDBBackend implements GraphBackend {
       propsDict["valid_from"] = toIso(props.valid_from);
       propsDict["recorded_at"] = toIso(props.recorded_at);
       if (props.valid_until) propsDict["valid_until"] = toIso(props.valid_until);
+      if (props.invalidated_by) propsDict["invalidated_by"] = props.invalidated_by;
+
+      // FalkorDB's Cypher engine errors with "Encountered unhandled type in
+      // inlined properties" when a CREATE property map contains `null` or
+      // `undefined` values. Strip them before sending so optional fields
+      // (context, success_rate, valid_until, invalidated_by) are simply
+      // absent rather than null. This is required for the M6 relationship-
+      // direction test (VAL-LOCAL-013) to exercise the falkordblite path.
+      const cleanProps: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(propsDict)) {
+        if (v !== null && v !== undefined) cleanProps[k] = v;
+      }
 
       const query = `
         MATCH (from:Memory {id: $from_id})
         MATCH (to {id: $to_id})
         WHERE to:Memory OR to:Entity
-        CREATE (from)-[r:${relationshipType} $properties]->(to)
+        CREATE (from)-[r:${relationshipType}]->(to)
+        SET r += $properties
         RETURN r.id as id
       `;
 
       const result = await this.executeQuery(
         query,
-        { from_id: fromMemoryId, to_id: toMemoryId, properties: propsDict },
+        { from_id: fromMemoryId, to_id: toMemoryId, properties: cleanProps },
         true
       );
 
@@ -519,14 +532,30 @@ export abstract class BaseFalkorDBBackend implements GraphBackend {
         relFilter = `:${relTypes.join("|")}`;
       }
 
+      // M6 (VAL-LOCAL-013): use startNode(rel)/endNode(rel) so the
+      // relationship direction is taken from the actual stored edge, NOT
+      // always `from_memory_id: memoryId`. The previous code reversed
+      // incoming edges (it set from_memory_id = memoryId for every row,
+      // which made A→B appear as B→A when queried from B). We also return
+      // the full rel properties (recorded_at, valid_from, valid_until, ...)
+      // so the temporal handlers (history / as-of / what-changed) see the
+      // real bi-temporal metadata.
+      //
+      // We extract the first relationship via `relationships(path)[0]`
+      // because FalkorDB's `r[0]` indexing on a variable-length path
+      // returns a value that startNode()/endNode() reject with
+      // "Type mismatch: expected String but was Integer". `relationships()`
+      // reliably returns a list of relationship objects.
       const query = `
         MATCH (start:Memory {id: $memory_id})
-        MATCH (start)-[r${relFilter}*1..${maxDepth}]-(related:Memory)
+        MATCH path = (start)-[r${relFilter}*1..${maxDepth}]-(related:Memory)
         WHERE related.id <> start.id
-        WITH DISTINCT related, r[0] as rel
+        WITH DISTINCT related, relationships(path)[0] as rel
         RETURN related,
                type(rel) as rel_type,
-               properties(rel) as rel_props
+               properties(rel) as rel_props,
+               startNode(rel).id as from_id,
+               endNode(rel).id as to_id
         ORDER BY rel.strength DESC, related.importance DESC
         LIMIT 20
       `;
@@ -544,16 +573,26 @@ export abstract class BaseFalkorDBBackend implements GraphBackend {
         const relTypeStr = (record["rel_type"] as string) ?? "RELATED_TO";
         const relProps = (record["rel_props"] as Record<string, unknown>) ?? {};
 
+        // Direction comes from the stored edge, not from which side we
+        // queried from. Fall back to memoryId/mem.id only if the driver
+        // returned neither endpoint (defensive — should never happen).
+        const fromId = (record["from_id"] as string) ?? memoryId;
+        const toId = (record["to_id"] as string) ?? mem.id!;
+
         const relationship: Relationship = {
           id: (relProps["id"] as string) ?? null,
-          from_memory_id: memoryId,
-          to_memory_id: mem.id!,
+          from_memory_id: fromId,
+          to_memory_id: toId,
           type: relTypeStr,
           properties: createRelationshipProperties({
             strength: (relProps["strength"] as number) ?? 0.5,
             confidence: (relProps["confidence"] as number) ?? 0.8,
             context: (relProps["context"] as string) ?? undefined,
             evidence_count: (relProps["evidence_count"] as number) ?? 1,
+            valid_from: relProps["valid_from"] as string | undefined,
+            valid_until: relProps["valid_until"] as string | undefined,
+            recorded_at: relProps["recorded_at"] as string | undefined,
+            invalidated_by: relProps["invalidated_by"] as string | undefined,
           }),
           description: null,
           bidirectional: false,
@@ -617,6 +656,59 @@ export abstract class BaseFalkorDBBackend implements GraphBackend {
   }
   isCypherCapable(): boolean {
     return true;
+  }
+
+  // -----------------------------------------------------------------------
+  // Bi-temporal change feed (M12 / VAL-LOCAL-014)
+  // -----------------------------------------------------------------------
+
+  /**
+   * Single Cypher query filtering relationships by `recorded_at >= $since`.
+   * Replaces the N+1 per-memory loop in `handleWhatChanged` (which also
+   * implicitly capped at 1000 memories via `searchMemories({limit: 1000})`).
+   * Returns the full matching set with no truncation.
+   */
+  async getRelationshipsSince(since: Date): Promise<Relationship[]> {
+    try {
+      const sinceIso = since instanceof Date ? since.toISOString() : String(since);
+      const query = `
+        MATCH (from:Memory)-[r]->(to:Memory)
+        WHERE r.recorded_at >= $since
+        RETURN r.id as id, type(r) as rel_type, properties(r) as rel_props,
+               from.id as from_id, to.id as to_id
+        ORDER BY r.recorded_at ASC
+      `;
+      const result = await this.executeQuery(query, { since: sinceIso }, false);
+
+      const relationships: Relationship[] = [];
+      for (const record of result) {
+        const relProps = (record["rel_props"] as Record<string, unknown>) ?? {};
+        const relTypeStr = (record["rel_type"] as string) ?? "RELATED_TO";
+        relationships.push({
+          id: (relProps["id"] as string) ?? null,
+          from_memory_id: (record["from_id"] as string) ?? "",
+          to_memory_id: (record["to_id"] as string) ?? "",
+          type: relTypeStr,
+          properties: createRelationshipProperties({
+            strength: (relProps["strength"] as number) ?? 0.5,
+            confidence: (relProps["confidence"] as number) ?? 0.8,
+            context: (relProps["context"] as string) ?? undefined,
+            evidence_count: (relProps["evidence_count"] as number) ?? 1,
+            valid_from: relProps["valid_from"] as string | undefined,
+            valid_until: relProps["valid_until"] as string | undefined,
+            recorded_at: relProps["recorded_at"] as string | undefined,
+            invalidated_by: relProps["invalidated_by"] as string | undefined,
+          }),
+          description: null,
+          bidirectional: false,
+        });
+      }
+      return relationships;
+    } catch (err) {
+      if (err instanceof DatabaseConnectionError) throw err;
+      console.error(`Failed to get relationships since ${since}: ${err}`);
+      throw new DatabaseConnectionError(`Failed to get relationships since: ${err}`);
+    }
   }
 }
 
