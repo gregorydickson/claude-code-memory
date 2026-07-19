@@ -56,10 +56,3 @@ export async function hasCycle(
 
   return dfs(toMemoryId, 0);
 }
-
-export async function findAllCycles(
-  _memoryDb: MemoryDBLike,
-  _relationshipType?: string
-): Promise<string[][]> {
-  throw new Error("find_all_cycles not yet implemented");
-}

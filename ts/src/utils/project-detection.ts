@@ -75,10 +75,3 @@ function detectFromGit(cwd: string): ProjectContext | null {
     git_remote: gitRemote,
   };
 }
-
-export async function getProjectFromMemories(
-  _db: unknown,
-  _limit = 50
-): Promise<string | null> {
-  return null;
-}

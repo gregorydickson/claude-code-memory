@@ -29,6 +29,7 @@ import {
   handleWhatChanged,
 } from "./tools/temporal.ts";
 import { surfaceGenericError } from "./tools/error-handling.ts";
+import { assertAutoModeSafe } from "./observe-only-guard.ts";
 
 import { exportToJson, importFromJson, exportToMarkdown } from "./utils/export-import.ts";
 import {
@@ -375,6 +376,16 @@ export async function main(): Promise<void> {
 
   const command = args[0];
   const commandArgs = args.slice(1);
+
+  // Tier 3 #20: observe-only guard. When auto mode is active
+  // (MEMORYGRAPH_AUTO_MODE=1), MemoryGraph may only record/query — it must
+  // never block a Done-flip, gate, or commit. Every CLI command is an
+  // observe-only operation by design (see observe-only-guard.ts), so this
+  // assertion is a defensive check that fires only if a blocking operation
+  // were ever wired into the dispatch. The guard test sweeps the full
+  // command surface to assert no blocking path is reachable. In manual mode
+  // (auto mode OFF) the guard is a no-op.
+  assertAutoModeSafe(command);
 
   try {
     switch (command) {
