@@ -22,6 +22,7 @@
  */
 
 import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { mkdirSync, existsSync } from "node:fs";
 import { platform, arch } from "node:os";
 
@@ -29,6 +30,16 @@ import { Config } from "../config.ts";
 import { DatabaseConnectionError } from "../errors.ts";
 import { BaseFalkorDBBackend } from "./falkordb-shared.ts";
 import type { HealthCheckResult } from "./index.ts";
+
+/**
+ * ESM-safe `__dirname` equivalent. Under Bun, `__dirname` is a global; under
+ * Node ESM (the M3+ runtime target), it is undefined. `import.meta.url` is
+ * available in both runtimes, so `dirname(fileURLToPath(import.meta.url))`
+ * resolves to this file's directory (`ts/src/backends/`) in both. This is
+ * required for VAL-CROSS-001 / VAL-CROSS-003 (node parity) so the vendored-
+ * binary resolver works under `node`, not just under `bun`.
+ */
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 /**
  * Map the current Node process to a vendored platform directory name.

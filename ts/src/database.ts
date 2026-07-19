@@ -45,6 +45,19 @@ export interface IMemoryDatabase {
   getMemoryStatistics(): Promise<Record<string, unknown>>;
   getRecentActivity?(days?: number, project?: string | null): Promise<Record<string, unknown>>;
   getRelationshipsSince?(since: Date): Promise<Relationship[]>;
+
+  // M1 (VAL-LOCAL-031): recall differs from search. Delegates to
+  // backend.recallMemories when the backend implements it; the wrapper
+  // falls back to searchMemories if the backend does not (so `recall`
+  // still works on backends without a recall-specific implementation).
+  recallMemories?(
+    query: string,
+    opts?: { memoryTypes?: string[]; projectPath?: string; limit?: number }
+  ): Promise<Memory[]>;
+
+  // H7 temporal (VAL-LOCAL-017..019): minimal memory versioning.
+  getMemoryStateAt?(memoryId: string, timestamp: Date): Promise<Memory | null>;
+  getMemoryVersions?(memoryId: string): Promise<Memory[]>;
 }
 
 /**
@@ -164,6 +177,74 @@ export class MemoryDatabase implements IMemoryDatabase {
     }
     return [];
   }
+
+  /**
+   * M1 (VAL-LOCAL-031): recall != search. Delegates to
+   * `backend.recallMemories` when the backend implements it; otherwise
+   * falls back to `searchMemories` so `recall` still works on backends
+   * without a recall-specific implementation (e.g. sqlite, where recall
+   * delegates to search by design).
+   */
+  async recallMemories(
+    query: string,
+    opts?: { memoryTypes?: string[]; projectPath?: string; limit?: number }
+  ): Promise<Memory[]> {
+    if (this.backend.recallMemories) {
+      return this.backend.recallMemories(query, opts);
+    }
+    // Fallback: recall reduces to a plain search.
+    const searchQuery: SearchQuery = {
+      query,
+      terms: [],
+      memory_types: opts?.memoryTypes ?? [],
+      tags: [],
+      project_path: opts?.projectPath,
+      languages: [],
+      frameworks: [],
+      min_importance: undefined,
+      min_confidence: undefined,
+      min_effectiveness: undefined,
+      created_after: undefined,
+      created_before: undefined,
+      limit: opts?.limit ?? 20,
+      offset: 0,
+      include_relationships: true,
+      search_tolerance: "normal",
+      match_mode: "any",
+      relationship_filter: undefined,
+    };
+    return this.backend.searchMemories(searchQuery);
+  }
+
+  /**
+   * H7 temporal (VAL-LOCAL-017..019): the memory's state at `timestamp`.
+   * Delegates to `backend.getMemoryStateAt` when implemented; otherwise
+   * returns the current memory (no versioning available — temporal
+   * handlers surface this gracefully).
+   */
+  async getMemoryStateAt(memoryId: string, timestamp: Date): Promise<Memory | null> {
+    if (this.backend.getMemoryStateAt) {
+      return this.backend.getMemoryStateAt(memoryId, timestamp);
+    }
+    // Fallback: return the current memory if it exists, regardless of
+    // timestamp. Backends without versioning cannot reconstruct historical
+    // state; the caller treats this as "the memory's current state".
+    return this.backend.getMemory(memoryId, false);
+  }
+
+  /**
+   * H7 temporal (VAL-LOCAL-018): the memory's version history. Delegates to
+   * `backend.getMemoryVersions` when implemented; otherwise returns a
+   * single-element list with the current memory (no versioning available).
+   */
+  async getMemoryVersions(memoryId: string): Promise<Memory[]> {
+    if (this.backend.getMemoryVersions) {
+      return this.backend.getMemoryVersions(memoryId);
+    }
+    // Fallback: a single-element list containing the current memory.
+    const current = await this.backend.getMemory(memoryId, false);
+    return current ? [current] : [];
+  }
 }
 
 /**
@@ -262,5 +343,50 @@ export class CloudMemoryDatabase implements IMemoryDatabase {
       return this.backend.getRelationshipsSince(since);
     }
     return [];
+  }
+
+  async recallMemories(
+    query: string,
+    opts?: { memoryTypes?: string[]; projectPath?: string; limit?: number }
+  ): Promise<Memory[]> {
+    if (this.backend.recallMemories) {
+      return this.backend.recallMemories(query, opts);
+    }
+    const searchQuery: SearchQuery = {
+      query,
+      terms: [],
+      memory_types: opts?.memoryTypes ?? [],
+      tags: [],
+      project_path: opts?.projectPath,
+      languages: [],
+      frameworks: [],
+      min_importance: undefined,
+      min_confidence: undefined,
+      min_effectiveness: undefined,
+      created_after: undefined,
+      created_before: undefined,
+      limit: opts?.limit ?? 20,
+      offset: 0,
+      include_relationships: true,
+      search_tolerance: "normal",
+      match_mode: "any",
+      relationship_filter: undefined,
+    };
+    return this.backend.searchMemories(searchQuery);
+  }
+
+  async getMemoryStateAt(memoryId: string, timestamp: Date): Promise<Memory | null> {
+    if (this.backend.getMemoryStateAt) {
+      return this.backend.getMemoryStateAt(memoryId, timestamp);
+    }
+    return this.backend.getMemory(memoryId, false);
+  }
+
+  async getMemoryVersions(memoryId: string): Promise<Memory[]> {
+    if (this.backend.getMemoryVersions) {
+      return this.backend.getMemoryVersions(memoryId);
+    }
+    const current = await this.backend.getMemory(memoryId, false);
+    return current ? [current] : [];
   }
 }

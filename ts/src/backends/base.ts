@@ -78,6 +78,15 @@ export interface GraphBackend {
     query: string,
     opts?: { memoryTypes?: string[]; projectPath?: string; limit?: number }
   ): Promise<Memory[]>;
+
+  // H7 temporal — minimal memory versioning (M5 / VAL-LOCAL-017..019).
+  // Backends that implement these snapshot the prior memory state on
+  // `updateMemory` into a version store so `as-of` / `history` can return
+  // the memory's state at an arbitrary timestamp. Backends that do not
+  // implement them leave temporal queries to the relationship-based path
+  // (which still works for relationships but not for memory content).
+  getMemoryStateAt?(memoryId: string, timestamp: Date): Promise<Memory | null>;
+  getMemoryVersions?(memoryId: string): Promise<Memory[]>;
 }
 
 // Re-export for convenience

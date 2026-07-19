@@ -46,6 +46,34 @@ export const handleQueryAsOf = neverThrowBoundary(
       return `Invalid timestamp format. Expected ISO 8601 (e.g., '2024-12-01T00:00:00Z'), got: ${asOfStr}`;
     }
 
+    // H7 (VAL-LOCAL-017): surface the memory's STATE at `as_of` in
+    // addition to the relationships valid at that time. Backends with
+    // minimal versioning (falkordblite, falkordb) reconstruct the
+    // pre-update content via `:MemoryVersion` snapshots; backends
+    // without versioning (sqlite, cloud) return the current state as a
+    // fallback. This makes `as-of` genuinely return "the memory's state
+    // at that time" rather than only the relationship picture.
+    let stateText = "";
+    if (db.getMemoryStateAt) {
+      try {
+        const historicalState = await db.getMemoryStateAt(memoryId, asOf);
+        if (historicalState) {
+          stateText = `## Memory State as of ${asOfStr}\n\n`;
+          stateText += `**Title:** ${historicalState.title}\n`;
+          stateText += `**Type:** ${historicalState.type}\n`;
+          stateText += `**Content:** ${historicalState.content}\n`;
+          if (historicalState.summary) stateText += `**Summary:** ${historicalState.summary}\n`;
+          if (historicalState.tags && historicalState.tags.length > 0) {
+            stateText += `**Tags:** ${historicalState.tags.join(", ")}\n`;
+          }
+          stateText += `**Importance:** ${historicalState.importance}\n`;
+          stateText += `\n`;
+        }
+      } catch {
+        // Versioning query failed — fall through to relationship-only output.
+      }
+    }
+
     // Query as of the specified time - filter by valid_from/valid_until
     const related = await db.getRelatedMemories(memoryId, {
       relationshipTypes: args["relationship_types"],
@@ -61,18 +89,20 @@ export const handleQueryAsOf = neverThrowBoundary(
       return validFrom <= asOf && (!validUntil || validUntil > asOf);
     });
 
-    if (validAtTime.length === 0) {
-      return `No relationships found for memory '${memoryId}' as of ${asOfStr}`;
-    }
+    let text = stateText;
 
-    let text = `**Relationships as of ${asOfStr}** (${validAtTime.length} found):\n\n`;
-    for (let i = 0; i < validAtTime.length; i++) {
-      const [mem, rel] = validAtTime[i];
-      text += `**${i + 1}. ${mem.title}** (ID: ${mem.id})\n`;
-      text += `Relationship: ${rel.type} (strength: ${rel.properties.strength})\n`;
-      text += `Valid from: ${toIso(rel.properties.valid_from)}\n`;
-      text += `Valid until: ${rel.properties.valid_until ? toIso(rel.properties.valid_until) : "current"}\n`;
-      text += `Type: ${mem.type} | Importance: ${mem.importance}\n\n`;
+    if (validAtTime.length === 0) {
+      text += `No relationships found for memory '${memoryId}' as of ${asOfStr}`;
+    } else {
+      text += `**Relationships as of ${asOfStr}** (${validAtTime.length} found):\n\n`;
+      for (let i = 0; i < validAtTime.length; i++) {
+        const [mem, rel] = validAtTime[i];
+        text += `**${i + 1}. ${mem.title}** (ID: ${mem.id})\n`;
+        text += `Relationship: ${rel.type} (strength: ${rel.properties.strength})\n`;
+        text += `Valid from: ${toIso(rel.properties.valid_from)}\n`;
+        text += `Valid until: ${rel.properties.valid_until ? toIso(rel.properties.valid_until) : "current"}\n`;
+        text += `Type: ${mem.type} | Importance: ${mem.importance}\n\n`;
+      }
     }
 
     return text;
@@ -92,20 +122,57 @@ export const handleGetRelationshipHistory = neverThrowBoundary(
       return `Memory not found: ${memoryId}`;
     }
 
+    // H7 (VAL-LOCAL-018): include the memory's VERSION history (from
+    // `:MemoryVersion` snapshots) alongside the relationship history.
+    // Backends with minimal versioning (falkordblite, falkordb) return the
+    // full version chain; backends without versioning (sqlite, cloud)
+    // return a single-element list with the current state.
+    let versionText = "";
+    if (db.getMemoryVersions) {
+      try {
+        const versions = await db.getMemoryVersions(memoryId);
+        if (versions.length > 0) {
+          versionText = `## Version History (${versions.length} versions):\n\n`;
+          for (let i = 0; i < versions.length; i++) {
+            const v = versions[i];
+            const updated = v.updated_at instanceof Date ? v.updated_at.toISOString() : (v.updated_at ?? "");
+            versionText += `**${i + 1}. ${v.title ?? "Untitled"}**\n`;
+            versionText += `Type: ${v.type ?? "unknown"} | Version: ${v.version ?? 1}\n`;
+            versionText += `Updated: ${toIso(updated)}\n`;
+            if (v.content) {
+              const snippet = v.content.slice(0, 200);
+              versionText += `Content: ${snippet}${v.content.length > 200 ? "..." : ""}\n`;
+            }
+            if (v.tags && v.tags.length > 0) {
+              versionText += `Tags: ${v.tags.join(", ")}\n`;
+            }
+            versionText += `\n`;
+          }
+        }
+      } catch {
+        // Version query failed — fall through to relationship-only history.
+      }
+    }
+
     // Get all related memories (including invalidated ones)
     const history = await db.getRelatedMemories(memoryId, {
       relationshipTypes: args["relationship_types"],
       maxDepth: 2,
     });
 
+    let text = `**Relationship History for ${memoryId}** (${history.length} relationships):\n\n`;
+
+    if (versionText) {
+      text += versionText;
+    }
+
     if (history.length === 0) {
-      return `No relationship history found for memory: ${memoryId}`;
+      text += `No relationship history found for memory: ${memoryId}`;
+      return text;
     }
 
     const current = history.filter(([, rel]) => !rel.properties.valid_until);
     const invalidated = history.filter(([, rel]) => rel.properties.valid_until);
-
-    let text = `**Relationship History for ${memoryId}** (${history.length} relationships):\n\n`;
 
     if (current.length > 0) {
       text += "## Current Relationships:\n\n";

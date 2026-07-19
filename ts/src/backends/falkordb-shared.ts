@@ -404,18 +404,43 @@ export abstract class BaseFalkorDBBackend implements GraphBackend {
   async updateMemory(memory: Memory): Promise<boolean> {
     try {
       if (!memory.id) throw new ValidationError("Memory must have an ID to update");
-      memory.updated_at = new Date().toISOString();
+      const now = new Date().toISOString();
+      memory.updated_at = now;
 
       const properties = memoryToNodeProperties(memory);
 
+      // H7 (VAL-LOCAL-017..019): minimal memory versioning. Before
+      // overwriting the memory, snapshot the CURRENT (pre-update) state
+      // into a `:MemoryVersion` node linked via `(:Memory)-[:HAS_VERSION]
+      // ->(:MemoryVersion)`. The snapshot records `state_valid_from`
+      // (= the prior `updated_at` or `created_at`) and `state_valid_until`
+      // (= `now`, the update timestamp). `getMemoryStateAt(id, ts)` then
+      // returns the snapshot whose `[state_valid_from, state_valid_until)`
+      // contains `ts`, or the current memory if `ts >= current.updated_at`.
+      //
+      // The memory ID is stable (we SET in place), so `getMemory(id)` and
+      // all existing tests continue to work; the version chain is purely
+      // additive. `properties(m)` copies all current properties into the
+      // snapshot; we then add the version-specific metadata. We use SET
+      // (not inlined CREATE properties) to avoid FalkorDB's "unhandled
+      // type null" error on inlined nulls.
       const query = `
         MATCH (m:Memory {id: $id})
-        SET m += $properties
+        CREATE (v:MemoryVersion)
+        SET v += properties(m),
+            v.version_for = $id,
+            v.state_valid_from = coalesce(m.updated_at, m.created_at),
+            v.state_valid_until = $now,
+            v.version_number = coalesce(m.version, 1)
+        CREATE (m)-[:HAS_VERSION]->(v)
+        SET m += $properties,
+            m.updated_at = $now,
+            m.version = coalesce(m.version, 1) + 1
         RETURN m.id as id
       `;
       const result = await this.executeQuery(
         query,
-        { id: memory.id, properties },
+        { id: memory.id, properties, now },
         true
       );
 
@@ -642,6 +667,208 @@ export abstract class BaseFalkorDBBackend implements GraphBackend {
       }
     }
     return stats;
+  }
+
+  // -----------------------------------------------------------------------
+  // Recall (M1 / VAL-LOCAL-031)
+  // -----------------------------------------------------------------------
+
+  /**
+   * Recall memories with a recall-specific ranking that differs from
+   * `searchMemories`. Search orders by `importance DESC, created_at DESC`;
+   * recall orders by a composite `recall_score` that weighs `importance`,
+   * `confidence`, `effectiveness`, `usage_count`, and `last_accessed`
+   * recency. For memories with different `usage_count` / `effectiveness` /
+   * `last_accessed`, the recall ordering differs from the search ordering —
+   * this is the M1 fix that makes `recall != search` on falkordblite.
+   *
+   * The filter clause matches `searchMemories` (CONTAINS on
+   * title/content/summary) so recall is a superset of search's match
+   * candidates; only the ranking differs.
+   */
+  async recallMemories(
+    query: string,
+    opts?: { memoryTypes?: string[]; projectPath?: string; limit?: number }
+  ): Promise<Memory[]> {
+    try {
+      const conditions: string[] = [];
+      const parameters: Record<string, unknown> = {};
+
+      if (query) {
+        conditions.push(
+          "(m.title CONTAINS $query OR m.content CONTAINS $query OR m.summary CONTAINS $query)"
+        );
+        parameters["query"] = query;
+      }
+
+      if (opts?.memoryTypes && opts.memoryTypes.length > 0) {
+        conditions.push("m.type IN $memory_types");
+        parameters["memory_types"] = opts.memoryTypes;
+      }
+
+      if (opts?.projectPath) {
+        conditions.push("m.context_project_path = $project_path");
+        parameters["project_path"] = opts.projectPath;
+      }
+
+      const whereClause = conditions.length > 0 ? conditions.join(" AND ") : "true";
+      const limit = opts?.limit ?? 20;
+
+      // Recall score: importance 40%, confidence 20%, effectiveness 20%,
+      // usage_count 10% (capped), last_accessed recency 10%. Memories with
+      // no effectiveness / last_accessed fall back to neutral mid-scores
+      // so they are not penalised to zero.
+      const query_str = `
+        MATCH (m:Memory)
+        WHERE ${whereClause}
+        WITH m,
+             (coalesce(m.importance, 0.5) * 0.4 +
+              coalesce(m.confidence, 0.8) * 0.2 +
+              coalesce(m.effectiveness, 0.5) * 0.2 +
+              coalesce(m.usage_count, 0) * 0.002 +
+              CASE WHEN m.last_accessed IS NOT NULL THEN 0.1 ELSE 0.0 END) as recall_score
+        RETURN m, recall_score
+        ORDER BY recall_score DESC, m.importance DESC, m.created_at DESC
+        LIMIT $limit
+      `;
+      parameters["limit"] = limit;
+
+      const result = await this.executeQuery(query_str, parameters, false);
+      const memories: Memory[] = [];
+      for (const record of result) {
+        const mem = parseMemoryFromProperties(record["m"] as Record<string, unknown>, this._display_name);
+        if (mem) {
+          // Attach a recall-specific match_info so consumers can tell
+          // recall results apart from search results.
+          mem.match_info = {
+            match_quality: "recall",
+            recall_score: record["recall_score"],
+            matched_fields: ["title", "content", "summary"],
+          };
+          memories.push(mem);
+        }
+      }
+
+      console.log(`Recalled ${memories.length} memories for query`);
+      return memories;
+    } catch (err) {
+      if (err instanceof DatabaseConnectionError) throw err;
+      console.error(`Failed to recall memories: ${err}`);
+      throw new DatabaseConnectionError(`Failed to recall memories: ${err}`);
+    }
+  }
+
+  // -----------------------------------------------------------------------
+  // H7 temporal — minimal memory versioning (VAL-LOCAL-017..019)
+  // -----------------------------------------------------------------------
+
+  /**
+   * Return the memory's state at `timestamp`. Uses the `:MemoryVersion`
+   * snapshots created by `updateMemory`. If `timestamp >= current.updated_at`
+   * (no update has happened since), returns the current memory. If a version
+   * snapshot covers `timestamp` (`state_valid_from <= ts < state_valid_until`),
+   * returns that snapshot. If `timestamp < memory.created_at` (the memory
+   * did not exist yet), returns null.
+   */
+  async getMemoryStateAt(memoryId: string, timestamp: Date): Promise<Memory | null> {
+    try {
+      const tsIso = timestamp instanceof Date ? timestamp.toISOString() : String(timestamp);
+      const query = `
+        MATCH (m:Memory {id: $memory_id})
+        OPTIONAL MATCH (m)-[:HAS_VERSION]->(v:MemoryVersion)
+        WHERE v.state_valid_from <= $ts AND v.state_valid_until > $ts
+        WITH m, v
+        ORDER BY v.state_valid_until ASC
+        LIMIT 1
+        RETURN m as current_node, v as version_node
+      `;
+      const result = await this.executeQuery(query, { memory_id: memoryId, ts: tsIso }, false);
+      if (result.length === 0) return null;
+
+      const record = result[0];
+      const versionNode = record["version_node"] as Record<string, unknown> | null | undefined;
+      const currentNode = record["current_node"] as Record<string, unknown> | null | undefined;
+
+      if (versionNode && Object.keys(versionNode).length > 0) {
+        // A historical version covers the timestamp.
+        return parseMemoryFromProperties(versionNode, this._display_name);
+      }
+
+      if (!currentNode) return null;
+
+      // No historical version covers the timestamp. If the memory existed
+      // at the timestamp (created_at <= ts), return the current state —
+      // either no update has happened since the timestamp, or the timestamp
+      // is after the last update. If the memory did not exist yet, return null.
+      const current = parseMemoryFromProperties(currentNode, this._display_name);
+      if (!current) return null;
+      const created = current.created_at instanceof Date
+        ? current.created_at.toISOString()
+        : String(current.created_at);
+      if (tsIso < created) return null;
+      return current;
+    } catch (err) {
+      if (err instanceof DatabaseConnectionError) throw err;
+      console.error(`Failed to get memory state at ${timestamp} for ${memoryId}: ${err}`);
+      throw new DatabaseConnectionError(`Failed to get memory state: ${err}`);
+    }
+  }
+
+  /**
+   * Return the memory's version history (newest-first), including the
+   * current state and all `:MemoryVersion` snapshots. Each entry is a
+   * parsed Memory; the current state is the first entry (highest
+   * `state_valid_until` / no `state_valid_until`).
+   */
+  async getMemoryVersions(memoryId: string): Promise<Memory[]> {
+    try {
+      // Use `properties(m)` / `collect(properties(v))` so the SDK returns
+      // flat property dicts (the convertFalkorDBValue flattener only
+      // processes top-level row values, not nested elements inside a
+      // `collect()` list). Without this, `collect(v)` returns wrapped
+      // node objects ({ id, labels, properties }) that
+      // parseMemoryFromProperties cannot parse.
+      const query = `
+        MATCH (m:Memory {id: $memory_id})
+        OPTIONAL MATCH (m)-[:HAS_VERSION]->(v:MemoryVersion)
+        RETURN properties(m) as current_node,
+               [x IN collect(v) WHERE x IS NOT NULL | properties(x)] as version_nodes
+      `;
+      const result = await this.executeQuery(query, { memory_id: memoryId }, false);
+      if (result.length === 0) return [];
+
+      const record = result[0];
+      const currentNode = record["current_node"] as Record<string, unknown> | null | undefined;
+      const versionNodes = (record["version_nodes"] as Record<string, unknown>[] | null | undefined) ?? [];
+
+      const versions: Memory[] = [];
+
+      // Current state first (newest).
+      if (currentNode && Object.keys(currentNode).length > 0) {
+        const current = parseMemoryFromProperties(currentNode, this._display_name);
+        if (current) versions.push(current);
+      }
+
+      // Historical versions, newest-first by state_valid_until descending.
+      const historical: Memory[] = [];
+      for (const vnode of versionNodes) {
+        if (!vnode || Object.keys(vnode).length === 0) continue;
+        const mem = parseMemoryFromProperties(vnode, this._display_name);
+        if (mem) historical.push(mem);
+      }
+      historical.sort((a, b) => {
+        const aTs = (a.updated_at instanceof Date ? a.updated_at.toISOString() : String(a.updated_at ?? ""));
+        const bTs = (b.updated_at instanceof Date ? b.updated_at.toISOString() : String(b.updated_at ?? ""));
+        return bTs.localeCompare(aTs);
+      });
+      versions.push(...historical);
+
+      return versions;
+    } catch (err) {
+      if (err instanceof DatabaseConnectionError) throw err;
+      console.error(`Failed to get memory versions for ${memoryId}: ${err}`);
+      throw new DatabaseConnectionError(`Failed to get memory versions: ${err}`);
+    }
   }
 
   // -----------------------------------------------------------------------

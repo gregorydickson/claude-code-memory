@@ -60,28 +60,49 @@ const _handleRecallMemories = handleToolErrors(
   async (db: IMemoryDatabase, args: Record<string, unknown>): Promise<string> => {
     validateSearchInput(args);
 
-    const searchQuery: SearchQuery = {
-      query: (args["query"] as string) ?? undefined,
-      terms: [],
-      memory_types: (args["memory_types"] as string[]) ?? [],
-      tags: [],
-      project_path: (args["project_path"] as string) ?? undefined,
-      languages: [],
-      frameworks: [],
-      min_importance: undefined,
-      min_confidence: undefined,
-      min_effectiveness: undefined,
-      created_after: undefined,
-      created_before: undefined,
+    // M1 (VAL-LOCAL-031): recall != search. Call `db.recallMemories` (which
+    // delegates to `backend.recallMemories` with a searchMemories fallback)
+    // instead of `db.searchMemories` directly. On falkordblite this invokes
+    // the recall-specific ranking (importance + confidence + effectiveness +
+    // usage_count + last_accessed recency), which differs from search's
+    // `importance DESC, created_at DESC` ordering. On backends without a
+    // recall-specific implementation (e.g. sqlite), recall falls back to a
+    // plain search — the documented behavior.
+    const query = (args["query"] as string) ?? undefined;
+    const opts = {
+      query,
+      memoryTypes: (args["memory_types"] as string[]) ?? [],
+      projectPath: (args["project_path"] as string) ?? undefined,
       limit: (args["limit"] as number) ?? 20,
-      offset: (args["offset"] as number) ?? 0,
-      include_relationships: true,
-      search_tolerance: "normal",
-      match_mode: "any",
-      relationship_filter: undefined,
     };
 
-    const memories = await db.searchMemories(searchQuery);
+    const memories = await (db.recallMemories
+      ? db.recallMemories(opts.query ?? "", {
+          memoryTypes: opts.memoryTypes,
+          projectPath: opts.projectPath,
+          limit: opts.limit,
+        })
+      : db.searchMemories({
+          query,
+          terms: [],
+          memory_types: opts.memoryTypes,
+          tags: [],
+          project_path: opts.projectPath,
+          languages: [],
+          frameworks: [],
+          min_importance: undefined,
+          min_confidence: undefined,
+          min_effectiveness: undefined,
+          created_after: undefined,
+          created_before: undefined,
+          limit: opts.limit,
+          offset: (args["offset"] as number) ?? 0,
+          include_relationships: true,
+          search_tolerance: "normal",
+          match_mode: "any",
+          relationship_filter: undefined,
+        }));
+
     if (memories.length === 0) {
       return "No memories found matching your query. Try:\n- Using different search terms\n- Removing filters to broaden the search\n- Checking if memories have been stored for this topic";
     }
