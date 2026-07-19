@@ -25,6 +25,8 @@ import {
   type SearchQuery,
   createMemory,
   createRelationshipProperties,
+  isRelationshipType,
+  ALL_RELATIONSHIP_TYPES,
 } from "../models.ts";
 import {
   type GraphBackend,
@@ -394,6 +396,19 @@ export class SQLiteBackend implements GraphBackend {
     properties?: RelationshipProperties
   ): Promise<string> {
     if (!this.db) throw new DatabaseConnectionError("Not connected");
+
+    // SEC-11: validate the relationship type against the RelationshipType enum
+    // before writing. Without this, sqlite would happily store any arbitrary
+    // string in `relationships.rel_type`, which corrupts the graph (other
+    // backends reject invalid types via Zod / Cypher schema) and breaks
+    // export→import round-trips into a Cypher backend.
+    if (!isRelationshipType(relationshipType)) {
+      throw new RelationshipError(
+        `Invalid relationship type: '${relationshipType}'. ` +
+          `Valid types are: ${ALL_RELATIONSHIP_TYPES.join(", ")}`
+      );
+    }
+
     const relationshipId = randomUUID();
     const props = properties ?? createRelationshipProperties();
 

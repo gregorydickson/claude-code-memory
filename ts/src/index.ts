@@ -6,7 +6,7 @@
  * Local storage via FalkorDBLite or SQLite, cloud sync via MemoryGraph Cloud API.
  */
 
-export const VERSION = "0.12.4";
+export const VERSION = "1.0.0";
 
 // Models
 export {

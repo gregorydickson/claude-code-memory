@@ -58,7 +58,7 @@ import { captureTaskContext } from "./integration/context-capture.ts";
 import { detectProject, analyzeCodebase } from "./integration/project-analysis.ts";
 import { trackWorkflow, suggestWorkflow } from "./integration/workflow-tracking.ts";
 
-const VERSION = "0.13.0";
+const VERSION = "1.0.0";
 
 /** Error that signals the CLI should exit with a specific code.Thrown from
  *  inside try blocks so that `finally { await close() }` runs before exit. */
@@ -417,10 +417,78 @@ export async function main(): Promise<void> {
 // Command implementations
 // ---------------------------------------------------------------------------
 
-function parseSimpleArgs(args: string[]): Record<string, unknown> {
+/**
+ * Minimal CLI argument parser.
+ *
+ * Supported forms:
+ *   --key value              → { key: "value" }
+ *   --key=value              → { key: "value" }
+ *   --key=--value            → { key: "--value" }   (values starting with
+ *                                                       `--` are accepted
+ *                                                       when given via `=`)
+ *   --flag                   → { flag: true }
+ *   --key -- --weird-value   → { key: "--weird-value" }
+ *                                                       (`--` is the
+ *                                                       end-of-options
+ *                                                       sentinel: if a
+ *                                                       `--key` is awaiting
+ *                                                       its value, the
+ *                                                       immediately-following
+ *                                                       arg becomes that key's
+ *                                                       value even if it
+ *                                                       starts with `--`;
+ *                                                       otherwise all
+ *                                                       subsequent args are
+ *                                                       positional)
+ *   -- --weird-value         → { _positional: ["--weird-value"] }
+ *   positional               → { _positional: ["positional"] }
+ *
+ * Exported so tests can exercise the real parser directly (M3-backlog fix +
+ * M10 real-execution CLI tests), rather than a local reimplementation that
+ * can drift from the production logic.
+ */
+export function parseSimpleArgs(args: string[]): Record<string, unknown> {
   const result: Record<string, unknown> = {};
+  let endOfOptions = false;
+  let pendingKey: string | null = null;
+
+  const flushPending = (): void => {
+    if (pendingKey !== null) {
+      result[pendingKey] = true;
+      pendingKey = null;
+    }
+  };
+
   for (let i = 0; i < args.length; i++) {
+    if (endOfOptions) {
+      if (!result["_positional"]) result["_positional"] = [] as string[];
+      (result["_positional"] as string[]).push(args[i]);
+      continue;
+    }
+
+    if (args[i] === "--") {
+      // End-of-options sentinel (POSIX `--`). If a --key is awaiting its
+      // value AND the next arg starts with `--` (i.e. it would otherwise be
+      // misparsed as an option), that next arg becomes the pending key's
+      // value (value-escape). Otherwise the pending key flushes as a boolean
+      // flag and all subsequent args are positional.
+      if (
+        pendingKey !== null &&
+        i + 1 < args.length &&
+        args[i + 1].startsWith("--")
+      ) {
+        result[pendingKey] = args[i + 1];
+        pendingKey = null;
+        i++;
+      } else {
+        flushPending();
+      }
+      endOfOptions = true;
+      continue;
+    }
+
     if (args[i].startsWith("--")) {
+      flushPending();
       const raw = args[i].slice(2);
       if (raw.includes("=")) {
         const eqIdx = raw.indexOf("=");
@@ -429,13 +497,17 @@ function parseSimpleArgs(args: string[]): Record<string, unknown> {
         result[raw] = args[i + 1];
         i++;
       } else {
-        result[raw] = true;
+        // Maybe the next arg is the `--` sentinel delivering a `--`-prefixed
+        // value; wait one token before defaulting to boolean.
+        pendingKey = raw;
       }
     } else {
+      flushPending();
       if (!result["_positional"]) result["_positional"] = [] as string[];
       (result["_positional"] as string[]).push(args[i]);
     }
   }
+  flushPending();
   return result;
 }
 

@@ -7,7 +7,14 @@ import { writeFile, mkdir, readFile } from "node:fs/promises";
 import { join, dirname } from "node:path";
 
 import type { Memory, Relationship, SearchQuery, MemoryContext } from "../models.ts";
-import { createMemory, createRelationshipProperties, MemoryType, isMemoryType } from "../models.ts";
+import {
+  createMemory,
+  createRelationshipProperties,
+  MemoryType,
+  isMemoryType,
+  isRelationshipType,
+  ALL_RELATIONSHIP_TYPES,
+} from "../models.ts";
 import { paginateMemories } from "./pagination.ts";
 import type { IMemoryDatabase } from "../database.ts";
 
@@ -141,6 +148,21 @@ export async function importFromJson(
 
   for (const relData of relationships) {
     try {
+      // SEC-11: validate the relationship type against the RelationshipType
+      // enum before calling the backend. This is a defense-in-depth check
+      // that produces a clear, structured skip reason even when the backend
+      // itself does not validate (e.g. Cypher backends that accept any
+      // relationship type string at the Cypher layer). Backends that DO
+      // validate (sqlite) would reject anyway; this ensures importFromJson
+      // skips invalid types with a clear message regardless of backend.
+      const relType = relData["type"] as string;
+      if (typeof relType !== "string" || !isRelationshipType(relType)) {
+        throw new Error(
+          `Invalid relationship type: '${String(relType)}'. ` +
+            `Valid types are: ${ALL_RELATIONSHIP_TYPES.join(", ")}`
+        );
+      }
+
       const fromMem = await db.getMemory(relData["from_memory_id"] as string, false);
       const toMem = await db.getMemory(relData["to_memory_id"] as string, false);
       if (!fromMem || !toMem) {
@@ -152,7 +174,7 @@ export async function importFromJson(
       await db.createRelationship(
         relData["from_memory_id"] as string,
         relData["to_memory_id"] as string,
-        relData["type"] as string,
+        relType,
         createRelationshipProperties({
           strength: (propsData["strength"] as number) ?? 0.5,
           confidence: (propsData["confidence"] as number) ?? 0.8,

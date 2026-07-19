@@ -184,4 +184,65 @@ describe("SQLiteBackend", () => {
     expect(health.connected).toBe(true);
     expect(health.backend_type).toBe("sqlite");
   });
+
+  // -------------------------------------------------------------------------
+  // SEC-11 (VAL-FREEZE-007): createRelationship validates relationship type
+  // against the RelationshipType enum and rejects invalid types with a
+  // clear error. Without this check, sqlite silently stored arbitrary
+  // strings in `relationships.rel_type`, corrupting the graph and breaking
+  // export→import round-trips into Cypher backends.
+  // -------------------------------------------------------------------------
+  describe("SEC-11: createRelationship validates relationship type (VAL-FREEZE-007)", () => {
+    test("rejects an invalid relationship type with a clear error", async () => {
+      const problemId = await db.storeMemory(
+        createMemory({ type: "problem", title: "P", content: "c" })
+      );
+      const solutionId = await db.storeMemory(
+        createMemory({ type: "solution", title: "S", content: "c" })
+      );
+
+      await expect(
+        db.createRelationship(solutionId, problemId, "NOT_A_REAL_RELATIONSHIP_TYPE")
+      ).rejects.toThrow(/Invalid relationship type/);
+    });
+
+    test("error message lists the valid relationship types", async () => {
+      const a = await db.storeMemory(createMemory({ type: "problem", title: "A", content: "c" }));
+      const b = await db.storeMemory(createMemory({ type: "solution", title: "B", content: "c" }));
+
+      try {
+        await db.createRelationship(a, b, "BOGUS");
+        expect.unreachable("should have thrown");
+      } catch (err) {
+        expect(err instanceof Error).toBe(true);
+        const msg = (err as Error).message;
+        expect(msg).toContain("BOGUS");
+        // Mentions at least one valid type as guidance.
+        expect(msg).toContain("SOLVES");
+      }
+    });
+
+    test("does not write the invalid relationship to the database", async () => {
+      const a = await db.storeMemory(createMemory({ type: "problem", title: "A", content: "c" }));
+      const b = await db.storeMemory(createMemory({ type: "solution", title: "B", content: "c" }));
+
+      try {
+        await db.createRelationship(a, b, "INVALID_TYPE_XYZ");
+      } catch {
+        // expected
+      }
+
+      const stats = await db.getMemoryStatistics();
+      const totalRels = stats["total_relationships"] as Record<string, unknown>;
+      expect(totalRels["count"]).toBe(0);
+    });
+
+    test("accepts a valid relationship type (regression)", async () => {
+      const a = await db.storeMemory(createMemory({ type: "problem", title: "A", content: "c" }));
+      const b = await db.storeMemory(createMemory({ type: "solution", title: "B", content: "c" }));
+
+      const relId = await db.createRelationship(b, a, "SOLVES");
+      expect(relId).toBeDefined();
+    });
+  });
 });
