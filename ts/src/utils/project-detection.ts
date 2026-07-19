@@ -3,7 +3,7 @@
  * Auto-detects project name and context from the current working directory or git repo.
  */
 
-import { execSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { basename, resolve } from "node:path";
 
 export interface ProjectContext {
@@ -28,53 +28,52 @@ export function detectProjectContext(cwd?: string): ProjectContext | null {
   };
 }
 
-function detectFromGit(cwd: string): ProjectContext | null {
+/**
+ * Run a git subcommand using the array form of spawnSync (no shell, not
+ * injectable). Returns stdout trimmed, or `null` on non-zero exit / error.
+ *
+ * Tier 0 #2 security hygiene: every git invocation under ts/src/ MUST go
+ * through this array form — see tests/security/shell-string-git-regression.test.ts.
+ */
+function safeGit(args: string[], cwd: string, timeout = 2000): string | null {
   try {
-    execSync("git rev-parse --is-inside-work-tree", {
+    const result = spawnSync("git", args, {
       cwd,
       stdio: "pipe",
-      timeout: 2000,
+      timeout,
     });
+    if (result.status !== 0 || !result.stdout) return null;
+    return result.stdout.toString().trim();
   } catch {
     return null;
   }
+}
 
-  try {
-    const repoRoot = execSync("git rev-parse --show-toplevel", {
-      cwd,
-      stdio: "pipe",
-      timeout: 2000,
-    })
-      .toString()
-      .trim();
+function detectFromGit(cwd: string): ProjectContext | null {
+  // Probe: are we inside a git work tree? (exit 0 ⇒ yes.)
+  const probe = safeGit(["rev-parse", "--is-inside-work-tree"], cwd);
+  if (probe === null) return null;
 
-    const projectPath = repoRoot;
-    const projectName = basename(projectPath);
+  const repoRoot = safeGit(["rev-parse", "--show-toplevel"], cwd);
+  if (!repoRoot) return null;
 
-    let gitRemote: string | undefined;
-    try {
-      const rawRemote = execSync("git remote get-url origin", {
-        cwd,
-        stdio: "pipe",
-        timeout: 2000,
-      })
-        .toString()
-        .trim();
-      // Strip embedded credentials from git remote URL
-      gitRemote = rawRemote.replace(/^(https?:\/\/)[^@]+@/, "$1");
-    } catch {
-      // git remote is optional
-    }
+  const projectPath = repoRoot;
+  const projectName = basename(projectPath);
 
-    return {
-      project_name: projectName,
-      project_path: projectPath,
-      is_git_repo: true,
-      git_remote: gitRemote,
-    };
-  } catch {
-    return null;
+  // git remote is optional; a missing `origin` is fine.
+  const rawRemote = safeGit(["remote", "get-url", "origin"], cwd);
+  let gitRemote: string | undefined;
+  if (rawRemote) {
+    // Strip embedded credentials from git remote URL.
+    gitRemote = rawRemote.replace(/^(https?:\/\/)[^@]+@/, "$1");
   }
+
+  return {
+    project_name: projectName,
+    project_path: projectPath,
+    is_git_repo: true,
+    git_remote: gitRemote,
+  };
 }
 
 export async function getProjectFromMemories(

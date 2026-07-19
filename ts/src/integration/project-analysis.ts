@@ -10,7 +10,7 @@
  * - Code pattern identification
  */
 
-import { execSync, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { basename, extname, join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -151,14 +151,6 @@ function buildMemory(
       additional_metadata: metadata,
     },
   });
-}
-
-function safeExecSync(cmd: string, opts: { cwd: string; timeout: number }): string | null {
-  try {
-    return execSync(cmd, { stdio: "pipe", ...opts }).toString().trim();
-  } catch {
-    return null;
-  }
 }
 
 function safeGit(args: string[], opts: { cwd: string; timeout: number }): string | null {
