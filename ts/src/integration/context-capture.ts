@@ -17,6 +17,7 @@ import {
   createMemory,
   createRelationshipProperties,
   MemoryType,
+  RelationshipType,
   SearchQuerySchema,
   type Memory,
 } from "../models.ts";
@@ -167,7 +168,7 @@ export async function captureTaskContext(
       await backend.createRelationship(
         memoryId,
         fileId,
-        "INVOLVES",
+        RelationshipType.INVOLVES,
         createRelationshipProperties({ strength: 1.0 })
       );
     } catch (err) {
@@ -181,7 +182,7 @@ export async function captureTaskContext(
       await backend.createRelationship(
         memoryId,
         projectId,
-        "PART_OF",
+        RelationshipType.PART_OF,
         createRelationshipProperties({ strength: 1.0 })
       );
     } catch (err) {
@@ -245,7 +246,7 @@ export async function captureCommandExecution(
       await backend.createRelationship(
         memoryId,
         taskId,
-        "EXECUTED_IN",
+        RelationshipType.EXECUTED_IN,
         createRelationshipProperties({ strength: 1.0 })
       );
     } catch (err) {
@@ -261,7 +262,7 @@ export async function captureCommandExecution(
         await backend.createRelationship(
           memoryId,
           patternId,
-          "EXHIBITS",
+          RelationshipType.EXHIBITS,
           createRelationshipProperties({ strength: 0.9 })
         );
       } catch (err) {
@@ -376,7 +377,7 @@ export async function trackSolutionEffectiveness(
   notes?: string | null
 ): Promise<void> {
   // Create relationship between solution and error pattern
-  const relType = success ? "SOLVES" : "ATTEMPTED_SOLUTION";
+  const relType = success ? RelationshipType.SOLVES : RelationshipType.ATTEMPTED_SOLUTION;
 
   const props = createRelationshipProperties({
     strength: success ? 1.0 : 0.3,

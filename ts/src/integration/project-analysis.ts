@@ -20,6 +20,7 @@ import {
   createMemory,
   createRelationshipProperties,
   MemoryType,
+  RelationshipType,
   SearchQuerySchema,
   type Memory,
 } from "../models.ts";
@@ -509,7 +510,7 @@ export async function trackFileChanges(
       await backend.createRelationship(
         memoryId,
         projectId,
-        "PART_OF",
+        RelationshipType.PART_OF,
         createRelationshipProperties({ strength: 1.0 })
       );
     } catch (err) {
@@ -531,7 +532,7 @@ export async function trackFileChanges(
       await backend.createRelationship(
         memoryId,
         fileId,
-        changeType === "modified" ? "MODIFIES" : "CREATES",
+        changeType === "modified" ? RelationshipType.MODIFIES : RelationshipType.CREATES,
         createRelationshipProperties({ strength: 1.0 })
       );
     } catch (err) {
@@ -636,7 +637,7 @@ export async function identifyCodePatterns(
       await backend.createRelationship(
         memoryId,
         projectId,
-        "FOUND_IN",
+        RelationshipType.FOUND_IN,
         createRelationshipProperties({ strength: confidence })
       );
     } catch (err) {

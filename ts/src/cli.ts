@@ -385,9 +385,16 @@ export async function main(): Promise<void> {
   // were ever wired into the dispatch. The guard test sweeps the full
   // command surface to assert no blocking path is reachable. In manual mode
   // (auto mode OFF) the guard is a no-op.
-  assertAutoModeSafe(command);
+  //
+  // M6 never-throw consistency (folded into M7 P2 cleanup per AGENTS.md):
+  // `assertAutoModeSafe` is invoked INSIDE the main try/catch below so an
+  // `ObserveOnlyViolation` is surfaced through `surfaceGenericError` (the
+  // never-throw wrapper) rather than bypassing it and being printed as a
+  // raw `err.message` by the bottom `main().catch`. This keeps SEC-5
+  // generic surfacing intact for guard violations too.
 
   try {
+    assertAutoModeSafe(command);
     switch (command) {
       case "store":
         await cmdStore(commandArgs);

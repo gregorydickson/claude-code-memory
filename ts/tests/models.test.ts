@@ -50,7 +50,10 @@ describe("RelationshipType", () => {
   });
 
   test("ALL_RELATIONSHIP_TYPES contains all types", () => {
-    expect(ALL_RELATIONSHIP_TYPES.length).toBe(35);
+    // 35 base rel types + 9 integration rel types added in L4
+    // (VAL-P2-004): INVOLVES, PART_OF, EXECUTED_IN, EXHIBITS,
+    // ATTEMPTED_SOLUTION, IN_SESSION, MODIFIES, CREATES, FOUND_IN.
+    expect(ALL_RELATIONSHIP_TYPES.length).toBe(44);
   });
 });
 

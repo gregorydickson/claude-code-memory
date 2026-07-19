@@ -321,12 +321,17 @@ export class SQLiteBackend implements GraphBackend {
     }
 
     if (searchQuery.project_path) {
-      // SEC-10 (VAL-LOCAL-016): escape `%` and `_` wildcards in the
-      // user-supplied project_path so it is matched literally inside the
-      // JSON context blob. The outer `%` wildcards (intentional) are
-      // preserved; only the interpolated project_path portion is escaped.
-      conditions.push("context LIKE ? ESCAPE '\\'");
-      params.push(`%"project_path":"${escapeLikeLiteral(searchQuery.project_path)}"%`);
+      // L3 (VAL-P2-003): filter project_path via `json_extract` (extract the
+      // field from the JSON context blob BEFORE comparison) instead of a
+      // brittle LIKE against the raw JSON blob. `json_extract` is
+      // supported by both `node:sqlite` (Node v24) and `bun:sqlite`
+      // (SQLite 3.38+) and matches the project_path exactly, so no LIKE
+      // wildcard escaping is needed here (the SEC-10 escapeLikeLiteral
+      // helper is still used for the tag LIKE filter above). This is also
+      // robust to JSON whitespace / key-ordering differences in the stored
+      // context blob that the previous raw-blob substring match would miss.
+      conditions.push("json_extract(context, '$.project_path') = ?");
+      params.push(searchQuery.project_path);
     }
 
     if (searchQuery.min_importance !== undefined && searchQuery.min_importance !== null) {

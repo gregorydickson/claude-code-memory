@@ -309,8 +309,20 @@ export class ContextRetriever {
       const results = await this.backend.executeQuery(query, params, false);
       if (results.length > 0) {
         const summary = results[0]["project_summary"];
+        // L1 (VAL-P2-001): build the typed ProjectSummary explicitly from
+        // the returned record fields instead of downcasting the raw
+        // `object` to the typed interface (the dead redundant cast flagged
+        // in L1). ProjectSummary is all-optional fields, so we extract each
+        // field by name from the record-shaped object.
         if (summary && typeof summary === "object") {
-          return summary as ProjectSummary;
+          const s = summary as Record<string, unknown>;
+          return {
+            total_memories: s["total_memories"] as number | undefined,
+            recent_activity: s["recent_activity"] as Record<string, unknown>[] | undefined,
+            decisions: s["decisions"] as Record<string, unknown>[] | undefined,
+            open_problems: s["open_problems"] as Record<string, unknown>[] | undefined,
+            solutions: s["solutions"] as Record<string, unknown>[] | undefined,
+          };
         }
       }
       return {

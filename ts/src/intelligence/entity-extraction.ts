@@ -276,7 +276,14 @@ export class EntityExtractor {
         confidence = 0.85;
       }
     } else if (entityType === EntityType.FUNCTION) {
-      if (text.endsWith("()")) confidence = 0.9;
+      // L2 (VAL-P2-002): the FUNCTION regex patterns capture group 1, which
+      // is the function NAME WITHOUT the trailing parens (e.g. `getMemory()`
+      // -> entity text `getMemory`). The previous confidence branch that
+      // checked for a trailing-parens suffix on the captured text was
+      // therefore dead — it could never fire because the captured text
+      // never contains the parens. Removed to keep the confidence table
+      // honest; FUNCTION entities keep the default 0.7 confidence (the
+      // previous behavior, since the dead branch never executed).
     } else if (entityType === EntityType.CLASS) {
       if (
         text.endsWith("Handler") ||

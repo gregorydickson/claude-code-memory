@@ -78,6 +78,21 @@ export const RelationshipType = {
   PREFERRED_OVER: "PREFERRED_OVER",
   DEPRECATED_BY: "DEPRECATED_BY",
   VALIDATED_BY: "VALIDATED_BY",
+  // Integration (context-capture / workflow-tracking / project-analysis)
+  // L4 (VAL-P2-004): the integration modules emit these relationship types
+  // when linking memories to file/session/project entities. They are
+  // first-class members of the enum so `isRelationshipType()` accepts them
+  // and the SEC-11 validation in `sqlite.createRelationship` /
+  // `importFromJson` does not reject integration-emitted edges.
+  INVOLVES: "INVOLVES",
+  PART_OF: "PART_OF",
+  EXECUTED_IN: "EXECUTED_IN",
+  EXHIBITS: "EXHIBITS",
+  ATTEMPTED_SOLUTION: "ATTEMPTED_SOLUTION",
+  IN_SESSION: "IN_SESSION",
+  MODIFIES: "MODIFIES",
+  CREATES: "CREATES",
+  FOUND_IN: "FOUND_IN",
 } as const;
 
 export type RelationshipType = (typeof RelationshipType)[keyof typeof RelationshipType];

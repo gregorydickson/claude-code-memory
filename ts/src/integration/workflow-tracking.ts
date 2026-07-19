@@ -17,6 +17,7 @@ import {
   createMemory,
   createRelationshipProperties,
   MemoryType,
+  RelationshipType,
   SearchQuerySchema,
   type Memory,
 } from "../models.ts";
@@ -159,7 +160,7 @@ export async function trackWorkflow(
     await backend.createRelationship(
       memoryId,
       sessionId,
-      "IN_SESSION",
+      RelationshipType.IN_SESSION,
       createRelationshipProperties({ strength: 1.0 })
     );
 
@@ -180,7 +181,7 @@ export async function trackWorkflow(
       await backend.createRelationship(
         memoryId,
         prevId,
-        "FOLLOWS",
+        RelationshipType.FOLLOWS,
         createRelationshipProperties({ strength: 0.8 })
       );
     }
