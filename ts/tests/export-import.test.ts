@@ -2,14 +2,15 @@
  * Tests for the export/import utilities.
  */
 
-import { describe, test, expect, beforeEach, afterEach } from "bun:test";
+import { describe, test, expect, beforeEach, afterEach, spyOn } from "bun:test";
 import { SQLiteBackend } from "../src/backends/sqlite.js";
 import { MemoryDatabase } from "../src/database.js";
 import { createMemory, createRelationshipProperties } from "../src/models.js";
 import { exportToJson, importFromJson } from "../src/utils/export-import.js";
-import { unlinkSync, existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { unlinkSync, existsSync, readFileSync, readdirSync } from "node:fs";
+import { join, dirname, basename } from "node:path";
 import { tmpdir } from "node:os";
+import * as fsPromises from "node:fs/promises";
 
 const TEST_DB = join(tmpdir(), `mg-export-test-${Date.now()}.db`);
 const EXPORT_FILE = join(tmpdir(), `mg-export-${Date.now()}.json`);
@@ -266,6 +267,68 @@ describe("Export/Import", () => {
         } catch {
           // ignore
         }
+      }
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // VAL-LOCAL-012: atomic export (temp + rename + fsync). exportToJson must
+  // write to a temp file then rename it into place (with fsync), so a crash
+  // mid-export does not leave a half-written export file at the target path.
+  // -------------------------------------------------------------------------
+  describe("VAL-LOCAL-012: atomic export (temp + rename + fsync)", () => {
+    test("exportToJson uses rename to put the file in place (temp-then-rename)", async () => {
+      // Spy on fs/promises.rename — the temp-then-rename pattern MUST call
+      // rename as the final atomic step. A non-atomic writeFile-only impl
+      // would never call rename.
+      const renameSpy = spyOn(fsPromises, "rename");
+
+      try {
+        const result = await exportToJson(db, EXPORT_FILE);
+        expect(result["memory_count"]).toBe(2);
+        expect(existsSync(EXPORT_FILE)).toBe(true);
+        expect(renameSpy).toHaveBeenCalled();
+        // The destination of the rename must be the target export path.
+        const lastCallArgs = renameSpy.mock.calls[renameSpy.mock.calls.length - 1];
+        expect(lastCallArgs[1]).toBe(EXPORT_FILE);
+      } finally {
+        renameSpy.mockRestore();
+      }
+    });
+
+    test("exportToJson leaves no .tmp files behind after a successful export", async () => {
+      await exportToJson(db, EXPORT_FILE);
+      const dir = dirname(EXPORT_FILE);
+      const base = basename(EXPORT_FILE);
+      const leftovers = readdirSync(dir).filter(
+        (f) => f !== base && f.startsWith(`${base}.`) && f.endsWith(".tmp")
+      );
+      expect(leftovers.length).toBe(0);
+      expect(existsSync(EXPORT_FILE)).toBe(true);
+    });
+
+    test("a failed rename does not leave a half-written target file", async () => {
+      // Stub fs/promises.rename to reject — the temp file is written but the
+      // final atomic rename into place fails. The target file must NOT exist
+      // (no half-written file at the target path); the orphaned temp file is
+      // cleaned up by the atomic-write helper.
+      const renameSpy = spyOn(fsPromises, "rename").mockRejectedValue(
+        Object.assign(new Error("synthetic rename failure"), { code: "ENOENT" })
+      );
+
+      try {
+        await expect(exportToJson(db, EXPORT_FILE)).rejects.toThrow(/synthetic rename failure/);
+        // No half-written file at the target path.
+        expect(existsSync(EXPORT_FILE)).toBe(false);
+        // No leftover .tmp file either.
+        const dir = dirname(EXPORT_FILE);
+        const base = basename(EXPORT_FILE);
+        const leftovers = readdirSync(dir).filter(
+          (f) => f.startsWith(`${base}.`) && f.endsWith(".tmp")
+        );
+        expect(leftovers.length).toBe(0);
+      } finally {
+        renameSpy.mockRestore();
       }
     });
   });

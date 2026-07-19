@@ -381,10 +381,27 @@ export class SQLiteBackend implements GraphBackend {
 
   async deleteMemory(memoryId: string): Promise<boolean> {
     if (!this.db) throw new DatabaseConnectionError("Not connected");
-    // Delete relationships first
-    this.db.prepare("DELETE FROM relationships WHERE from_id = ? OR to_id = ?").run(memoryId, memoryId);
-    const result = this.db.prepare("DELETE FROM memories WHERE id = ?").run(memoryId);
-    return result.changes > 0;
+    // Wrap the two-statement delete (rels + memory) in a SINGLE transaction
+    // so a failure between the two statements cannot leave a memory deleted
+    // but its relationships orphaned (or vice versa). See VAL-LOCAL-011.
+    this.db.exec("BEGIN");
+    try {
+      // Delete relationships first.
+      this.db
+        .prepare("DELETE FROM relationships WHERE from_id = ? OR to_id = ?")
+        .run(memoryId, memoryId);
+      const result = this.db.prepare("DELETE FROM memories WHERE id = ?").run(memoryId);
+      this.db.exec("COMMIT");
+      return result.changes > 0;
+    } catch (err) {
+      // Roll back any partial work so neither statement persists alone.
+      try {
+        this.db.exec("ROLLBACK");
+      } catch {
+        // ignore rollback errors (e.g. txn already ended)
+      }
+      throw err;
+    }
   }
 
   // -- Relationships --

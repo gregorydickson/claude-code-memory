@@ -3,7 +3,7 @@
  * Supports JSON and Markdown export formats. Works with all backends.
  */
 
-import { writeFile, mkdir, readFile } from "node:fs/promises";
+import { mkdir, readFile, rename, unlink, open } from "node:fs/promises";
 import { join, dirname } from "node:path";
 
 import type { Memory, Relationship, SearchQuery, MemoryContext } from "../models.ts";
@@ -67,7 +67,7 @@ export async function exportToJson(
   };
 
   await mkdir(dirname(outputPath), { recursive: true });
-  await writeFile(outputPath, JSON.stringify(exportData, null, 2));
+  await atomicWriteFile(outputPath, JSON.stringify(exportData, null, 2));
 
   return {
     memory_count: memoriesData.length,
@@ -250,7 +250,7 @@ export async function exportToMarkdown(
       lines.push("");
     }
 
-    await writeFile(join(outputDir, filename), lines.join("\n"));
+    await atomicWriteFile(join(outputDir, filename), lines.join("\n"));
   }
 
   console.log(`Exported ${allMemories.length} memories to ${outputDir}`);
@@ -300,4 +300,35 @@ async function exportRelationships(
 
 function toIso(value: string | Date): string {
   return value instanceof Date ? value.toISOString() : value;
+}
+
+/**
+ * Write `data` to `targetPath` atomically using a temp-file + fsync + rename
+ * pattern, so a crash mid-export does not leave a half-written file at the
+ * target path. The temp file is created in the SAME directory as the target
+ * (so the final rename is atomic on POSIX — same filesystem). On failure at
+ * any step the temp file is unlinked and the target is never touched. See
+ * VAL-LOCAL-012.
+ */
+async function atomicWriteFile(targetPath: string, data: string): Promise<void> {
+  const tempPath = `${targetPath}.${process.pid}.${Date.now()}.tmp`;
+  let fh: Awaited<ReturnType<typeof open>> | null = null;
+  try {
+    fh = await open(tempPath, "w", 0o644);
+    await fh.writeFile(data);
+    // fsync the file contents to disk so the renamed file is durable.
+    await fh.sync();
+    await fh.close();
+    fh = null;
+    // Atomic rename into place. On POSIX, rename is atomic when source and
+    // destination are on the same filesystem (they are — same dir).
+    await rename(tempPath, targetPath);
+  } catch (err) {
+    if (fh) {
+      try { await fh.close(); } catch { /* ignore */ }
+    }
+    // Clean up the orphaned temp file if it still exists.
+    try { await unlink(tempPath); } catch { /* ignore */ }
+    throw err;
+  }
 }

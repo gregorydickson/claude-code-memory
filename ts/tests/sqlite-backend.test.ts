@@ -245,4 +245,61 @@ describe("SQLiteBackend", () => {
       expect(relId).toBeDefined();
     });
   });
+
+  // -------------------------------------------------------------------------
+  // VAL-LOCAL-011: atomic delete transaction. The sqlite backend must wrap
+  // the two-statement delete (rels + memory) in a SINGLE transaction so a
+  // failure between the two statements cannot leave a memory deleted but
+  // its relationships orphaned (or vice versa).
+  // -------------------------------------------------------------------------
+  describe("VAL-LOCAL-011: atomic delete transaction (single txn)", () => {
+    test("a failure between rel-delete and memory-delete rolls back (no orphans)", async () => {
+      const a = await db.storeMemory(createMemory({ type: "problem", title: "A", content: "c" }));
+      const b = await db.storeMemory(createMemory({ type: "solution", title: "B", content: "c" }));
+      await db.createRelationship(b, a, "SOLVES");
+
+      // Sanity: the relationship exists.
+      expect((await db.getRelatedMemories(b, { maxDepth: 1 })).length).toBe(1);
+
+      // Monkeypatch the underlying sqlite handle so the memory-delete
+      // `prepare` throws, simulating a failure BETWEEN the two DELETE
+      // statements. The rel-delete must be rolled back so the relationship
+      // is NOT orphaned (deleted while the memory survives).
+      const dbObj = backend.db!;
+      const origPrepare = dbObj.prepare.bind(dbObj);
+      (dbObj as { prepare: (sql: string) => unknown }).prepare = (sql: string) => {
+        if (sql.startsWith("DELETE FROM memories")) {
+          throw new Error("synthetic memory-delete failure");
+        }
+        return origPrepare(sql);
+      };
+
+      try {
+        await expect(db.deleteMemory(a)).rejects.toThrow(/synthetic memory-delete failure/);
+        // The rel-delete must have been rolled back — relationships NOT orphaned.
+        const related = await db.getRelatedMemories(b, { maxDepth: 1 });
+        expect(related.length).toBe(1);
+        // And the memory itself still exists (rollback restored both statements).
+        const stillExists = await db.getMemory(a);
+        expect(stillExists).not.toBeNull();
+      } finally {
+        (dbObj as { prepare: (sql: string) => unknown }).prepare = origPrepare;
+      }
+    });
+
+    test("successful delete still removes both memory and its relationships", async () => {
+      const a = await db.storeMemory(createMemory({ type: "problem", title: "A", content: "c" }));
+      const b = await db.storeMemory(createMemory({ type: "solution", title: "B", content: "c" }));
+      await db.createRelationship(b, a, "SOLVES");
+
+      expect((await db.getRelatedMemories(b, { maxDepth: 1 })).length).toBe(1);
+
+      const ok = await db.deleteMemory(a);
+      expect(ok).toBe(true);
+
+      // Memory gone, relationships gone — no orphans either way.
+      expect(await db.getMemory(a)).toBeNull();
+      expect((await db.getRelatedMemories(b, { maxDepth: 1 })).length).toBe(0);
+    });
+  });
 });
