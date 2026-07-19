@@ -9,7 +9,7 @@
  * - Decay old outcomes (design only)
  */
 
-import type { GraphBackend } from "../backends/index.js";
+import type { GraphBackend } from "../backends/index.ts";
 import { randomUUID } from "node:crypto";
 
 // ---------------------------------------------------------------------------

@@ -4,16 +4,16 @@
  * store_memory, get_memory, update_memory, delete_memory
  */
 
-import type { IMemoryDatabase } from "../database.js";
+import type { IMemoryDatabase } from "../database.ts";
 import {
-  Memory,
+  type Memory,
   MemoryType,
   isMemoryType,
   createMemory,
-} from "../models.js";
-import { MemoryContextSchema } from "../models.js";
-import { validateMemoryInput, validateSearchInput } from "../utils/validation.js";
-import { handleToolErrors, neverThrowBoundary } from "./error-handling.js";
+} from "../models.ts";
+import { MemoryContextSchema } from "../models.ts";
+import { validateMemoryInput, validateSearchInput } from "../utils/validation.ts";
+import { handleToolErrors, neverThrowBoundary } from "./error-handling.ts";
 
 const _handleStoreMemory = handleToolErrors(
   "store memory",

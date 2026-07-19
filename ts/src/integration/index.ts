@@ -10,22 +10,22 @@
  */
 
 // Context Capture
-export type { TaskContext, CommandExecution, ErrorPattern } from "./context-capture.js";
+export type { TaskContext, CommandExecution, ErrorPattern } from "./context-capture.ts";
 export {
   captureTaskContext,
   captureCommandExecution,
   analyzeErrorPatterns,
   trackSolutionEffectiveness,
-} from "./context-capture.js";
+} from "./context-capture.ts";
 
 // Project Analysis
-export type { ProjectInfo, CodebaseInfo, FileChange, Pattern } from "./project-analysis.js";
+export type { ProjectInfo, CodebaseInfo, FileChange, Pattern } from "./project-analysis.ts";
 export {
   detectProject,
   analyzeCodebase,
   trackFileChanges,
   identifyCodePatterns,
-} from "./project-analysis.js";
+} from "./project-analysis.ts";
 
 // Workflow Tracking
 export type {
@@ -33,10 +33,10 @@ export type {
   WorkflowSuggestion,
   Recommendation,
   SessionState,
-} from "./workflow-tracking.js";
+} from "./workflow-tracking.ts";
 export {
   trackWorkflow,
   suggestWorkflow,
   optimizeWorkflow,
   getSessionState,
-} from "./workflow-tracking.js";
+} from "./workflow-tracking.ts";

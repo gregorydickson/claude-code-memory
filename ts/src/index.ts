@@ -37,7 +37,7 @@ export {
   type MemoryGraph,
   type AnalysisResult,
   type MemoryNode,
-} from "./models.js";
+} from "./models.ts";
 
 // Errors
 export {
@@ -50,10 +50,10 @@ export {
   NotFoundError,
   BackendError,
   ConfigurationError,
-} from "./errors.js";
+} from "./errors.ts";
 
 // Config
-export { Config, TOOL_PROFILES, type BackendType, ALL_BACKEND_TYPES } from "./config.js";
+export { Config, TOOL_PROFILES, type BackendType, ALL_BACKEND_TYPES } from "./config.ts";
 
 // Backends
 export {
@@ -68,12 +68,12 @@ export {
   CloudBackend,
   CircuitBreaker,
   SQLiteBackend,
-} from "./backends/index.js";
+} from "./backends/index.ts";
 
-export { BackendFactory } from "./backends/factory.js";
+export { BackendFactory } from "./backends/factory.ts";
 
 // Database
-export { MemoryDatabase, CloudMemoryDatabase, type IMemoryDatabase } from "./database.js";
+export { MemoryDatabase, CloudMemoryDatabase, type IMemoryDatabase } from "./database.ts";
 
 // Tools
 export {
@@ -91,7 +91,7 @@ export {
   handleQueryAsOf,
   handleGetRelationshipHistory,
   handleWhatChanged,
-} from "./tools/index.js";
+} from "./tools/index.ts";
 
 // Utils
 export {
@@ -109,7 +109,7 @@ export {
   exportToJson,
   importFromJson,
   exportToMarkdown,
-} from "./utils/index.js";
+} from "./utils/index.ts";
 
 // Migration
 export {
@@ -120,23 +120,23 @@ export {
   MigrationError,
   backendConfigFromEnv,
   createMigrationOptions,
-} from "./migration/index.js";
+} from "./migration/index.ts";
 
 // Intelligence
-export * as intelligence from "./intelligence/index.js";
+export * as intelligence from "./intelligence/index.ts";
 
 // Analytics
-export * as analytics from "./analytics/index.js";
+export * as analytics from "./analytics/index.ts";
 
 // Proactive
-export * as proactive from "./proactive/index.js";
+export * as proactive from "./proactive/index.ts";
 
 // Integration
-export * as integration from "./integration/index.js";
+export * as integration from "./integration/index.ts";
 
 // SDK
-export * as sdk from "./sdk/index.js";
+export * as sdk from "./sdk/index.ts";
 
-// CLI entry point - call main() when run directly
-import { main } from "./cli.js";
-main();
+// CLI entry point is NOT auto-launched on import. Callers who want the CLI
+// must run `src/cli.ts` directly (or the compiled binary). Importing this
+// library as a module is side-effect-free.

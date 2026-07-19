@@ -5,7 +5,7 @@
  * Handles version tracking, memory history, and temporal queries.
  */
 
-import type { GraphBackend } from "../backends/index.js";
+import type { GraphBackend } from "../backends/index.ts";
 
 // ---------------------------------------------------------------------------
 // Temporal memory

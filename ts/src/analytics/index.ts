@@ -19,4 +19,4 @@ export {
   type LearningPath,
   type KnowledgeGap,
   type MemoryROI,
-} from "./advanced-queries.js";
+} from "./advanced-queries.ts";

@@ -10,9 +10,9 @@
  * - Recommended next steps
  */
 
-import type { GraphBackend } from "../backends/index.js";
-import { parseDatetime } from "../utils/datetime.js";
-import { detectProject, type ProjectInfo } from "../integration/project-analysis.js";
+import type { GraphBackend } from "../backends/index.ts";
+import { parseDatetime } from "../utils/datetime.ts";
+import { detectProject, type ProjectInfo } from "../integration/project-analysis.ts";
 
 // ---------------------------------------------------------------------------
 // Models

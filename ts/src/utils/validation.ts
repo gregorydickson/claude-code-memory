@@ -2,7 +2,7 @@
  * Input validation utilities for CLI commands.
  */
 
-import { ValidationError } from "../errors.js";
+import { ValidationError } from "../errors.ts";
 
 export const MAX_TITLE_LENGTH = 500;
 export const MAX_CONTENT_LENGTH = 50_000;

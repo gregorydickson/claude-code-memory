@@ -3,13 +3,13 @@
  * Supports JSON and Markdown export formats. Works with all backends.
  */
 
-import { writeFile, mkdir } from "node:fs/promises";
+import { writeFile, mkdir, readFile } from "node:fs/promises";
 import { join, dirname } from "node:path";
 
-import type { Memory, Relationship, SearchQuery, MemoryContext } from "../models.js";
-import { createMemory, createRelationshipProperties, MemoryType, isMemoryType } from "../models.js";
-import { paginateMemories } from "./pagination.js";
-import type { IMemoryDatabase } from "../database.js";
+import type { Memory, Relationship, SearchQuery, MemoryContext } from "../models.ts";
+import { createMemory, createRelationshipProperties, MemoryType, isMemoryType } from "../models.ts";
+import { paginateMemories } from "./pagination.ts";
+import type { IMemoryDatabase } from "../database.ts";
 
 export async function exportToJson(
   db: IMemoryDatabase,
@@ -75,8 +75,10 @@ export async function importFromJson(
   inputPath: string,
   skipDuplicates = false
 ): Promise<Record<string, number>> {
-  const file = Bun.file(inputPath);
-  const data = await file.json();
+  // Read with Node's fs/promises (replaces the former Bun-specific file API so
+  // the library is portable across Node and Bun).
+  const text = await readFile(inputPath, "utf-8");
+  const data = JSON.parse(text);
 
   if (data === null || typeof data !== "object" || Array.isArray(data)) {
     throw new Error("Invalid export format: expected a JSON object");

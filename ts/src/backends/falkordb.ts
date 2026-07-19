@@ -6,10 +6,10 @@
  * via BaseFalkorDBBackend; only connection setup differs.
  */
 
-import { Config } from "../config.js";
-import { DatabaseConnectionError } from "../errors.js";
-import { BaseFalkorDBBackend } from "./falkordb-shared.js";
-import type { HealthCheckResult } from "./index.js";
+import { Config } from "../config.ts";
+import { DatabaseConnectionError } from "../errors.ts";
+import { BaseFalkorDBBackend } from "./falkordb-shared.ts";
+import type { HealthCheckResult } from "./index.ts";
 
 export class FalkorDBBackend extends BaseFalkorDBBackend {
   _display_name = "FalkorDB";

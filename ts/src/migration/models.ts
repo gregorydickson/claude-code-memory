@@ -5,7 +5,7 @@
  * memories between different backend types.
  */
 
-import { Config, type BackendType } from "../config.js";
+import { Config, type BackendType } from "../config.ts";
 
 export interface BackendConfig {
   backend_type: BackendType;

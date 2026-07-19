@@ -10,7 +10,7 @@
 
 import { z } from "zod";
 
-import type { GraphBackend } from "../backends/index.js";
+import type { GraphBackend } from "../backends/index.ts";
 
 // ---------------------------------------------------------------------------
 // Entity types

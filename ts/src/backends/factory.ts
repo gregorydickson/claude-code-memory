@@ -5,10 +5,10 @@
  * Falls back to SQLite for zero-server embedded storage.
  */
 
-import { Config, type BackendType } from "../config.js";
-import { DatabaseConnectionError } from "../errors.js";
-import type { GraphBackend, HealthCheckResult } from "./index.js";
-import type { Memory, Relationship, RelationshipProperties, SearchQuery } from "../models.js";
+import { Config, type BackendType } from "../config.ts";
+import { DatabaseConnectionError } from "../errors.ts";
+import type { GraphBackend, HealthCheckResult } from "./index.ts";
+import type { Memory, Relationship, RelationshipProperties, SearchQuery } from "../models.ts";
 
 const VALID_BACKENDS =
   "neo4j, memgraph, falkordb, falkordblite, sqlite, turso, ladybugdb, cloud, auto";
@@ -107,7 +107,7 @@ export class BackendFactory {
   }
 
   static async createFalkorDBLite(dbPath?: string): Promise<GraphBackend> {
-    const { FalkorDBLiteBackend } = await import("./falkordblite.js");
+    const { FalkorDBLiteBackend } = await import("./falkordblite.ts");
     const path = dbPath ?? Config.FALKORDBLITE_PATH;
     const backend = new FalkorDBLiteBackend(path);
     await backend.connect();
@@ -116,7 +116,7 @@ export class BackendFactory {
   }
 
   static async createSQLite(dbPath?: string): Promise<GraphBackend> {
-    const { SQLiteBackend } = await import("./sqlite.js");
+    const { SQLiteBackend } = await import("./sqlite.ts");
     const path = dbPath ?? Config.SQLITE_PATH;
     const backend = new SQLiteBackend(path);
     await backend.connect();
@@ -129,7 +129,7 @@ export class BackendFactory {
     apiUrl?: string,
     timeout?: number
   ): Promise<GraphBackend> {
-    const { CloudRESTAdapter } = await import("./cloud.js");
+    const { CloudRESTAdapter } = await import("./cloud.ts");
     const key = apiKey ?? Config.MEMORYGRAPH_API_KEY;
     if (!key) {
       throw new DatabaseConnectionError(
@@ -146,7 +146,7 @@ export class BackendFactory {
     port?: number,
     password?: string
   ): Promise<GraphBackend> {
-    const { FalkorDBBackend } = await import("./falkordb.js");
+    const { FalkorDBBackend } = await import("./falkordb.ts");
     const backend = new FalkorDBBackend({
       host,
       port,
@@ -168,7 +168,7 @@ export class BackendFactory {
     username?: string,
     password?: string
   ): Promise<GraphBackend> {
-    const { MemgraphBackend } = await import("./memgraph.js");
+    const { MemgraphBackend } = await import("./memgraph.ts");
     const backend = new MemgraphBackend({ uri, username, password });
     await backend.connect();
     await backend.initializeSchema();

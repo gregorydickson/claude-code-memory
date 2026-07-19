@@ -11,8 +11,8 @@
  * - Memory ROI tracking
  */
 
-import type { GraphBackend } from "../backends/index.js";
-import { parseDatetime } from "../utils/datetime.js";
+import type { GraphBackend } from "../backends/index.ts";
+import { parseDatetime } from "../utils/datetime.ts";
 
 // ---------------------------------------------------------------------------
 // Models
@@ -353,7 +353,7 @@ export async function predictSolutionEffectiveness(
     }
 
     // Extract entities from problem description (lazy import to avoid circular deps)
-    const { extractEntities } = await import("../intelligence/entity-extraction.js");
+    const { extractEntities } = await import("../intelligence/entity-extraction.ts");
     const entities = extractEntities(problemDescription);
     const entityTexts = entities.map((e) => e.text);
 

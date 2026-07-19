@@ -4,10 +4,10 @@
  * get_recent_activity, get_memory_statistics, search_relationships_by_context
  */
 
-import type { IMemoryDatabase } from "../database.js";
-import type { Memory } from "../models.js";
-import { detectProjectContext } from "../utils/project-detection.js";
-import { handleToolErrors, neverThrowBoundary } from "./error-handling.js";
+import type { IMemoryDatabase } from "../database.ts";
+import type { Memory } from "../models.ts";
+import { detectProjectContext } from "../utils/project-detection.ts";
+import { handleToolErrors, neverThrowBoundary } from "./error-handling.ts";
 
 function getMemoryAttr(memory: Memory | Record<string, unknown>, attr: string, defaultVal?: unknown): unknown {
   if (typeof memory === "object" && memory !== null && attr in memory) {

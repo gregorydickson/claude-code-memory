@@ -4,10 +4,10 @@
  * search_memories, recall_memories, contextual_search
  */
 
-import type { IMemoryDatabase } from "../database.js";
-import type { SearchQuery, Memory } from "../models.js";
-import { validateSearchInput } from "../utils/validation.js";
-import { handleToolErrors, neverThrowBoundary } from "./error-handling.js";
+import type { IMemoryDatabase } from "../database.ts";
+import type { SearchQuery, Memory } from "../models.ts";
+import { validateSearchInput } from "../utils/validation.ts";
+import { handleToolErrors, neverThrowBoundary } from "./error-handling.ts";
 
 const _handleSearchMemories = handleToolErrors(
   "search memories",

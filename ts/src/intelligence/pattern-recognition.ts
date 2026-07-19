@@ -5,8 +5,8 @@
  * Recognizes patterns in memories using keyword and entity matching.
  */
 
-import type { GraphBackend } from "../backends/index.js";
-import { extractEntities } from "./entity-extraction.js";
+import type { GraphBackend } from "../backends/index.ts";
+import { extractEntities } from "./entity-extraction.ts";
 
 // ---------------------------------------------------------------------------
 // Pattern

@@ -1,17 +1,23 @@
 /**
  * SQLite fallback backend for MemoryGraph.
  *
- * Uses Bun's built-in SQLite for persistence and in-memory graph simulation
- * for relationship traversal. This enables zero-server, zero-config local
- * storage without requiring FalkorDB or any external database server.
+ * Uses Node's built-in `node:sqlite` for persistence and in-memory graph
+ * simulation for relationship traversal. This enables zero-server, zero-config
+ * local storage without requiring FalkorDB or any external database server.
+ *
+ * `node:sqlite` is imported lazily inside `connect()` so that merely loading
+ * this module (e.g. when bundled into the Bun-compiled binary that runs the
+ * default falkordblite backend) does not require `node:sqlite` to be present
+ * in the host runtime. The import is only attempted when the sqlite backend is
+ * actually selected, which is also the only time it is needed (Node >= 20).
  */
 
-import { Database as BunDatabase } from "bun:sqlite";
+import type { DatabaseSync } from "node:sqlite";
 import { randomUUID } from "node:crypto";
 import { dirname } from "node:path";
 import { mkdirSync } from "node:fs";
 
-import { Config } from "../config.js";
+import { Config } from "../config.ts";
 import {
   type Memory,
   type Relationship,
@@ -19,17 +25,17 @@ import {
   type SearchQuery,
   createMemory,
   createRelationshipProperties,
-} from "../models.js";
+} from "../models.ts";
 import {
   type GraphBackend,
   type HealthCheckResult,
-} from "./base.js";
+} from "./base.ts";
 import {
   DatabaseConnectionError,
   MemoryNotFoundError,
   RelationshipError,
   ValidationError,
-} from "../errors.js";
+} from "../errors.ts";
 
 interface RelRow {
   id: string;
@@ -47,9 +53,42 @@ interface RelRow {
   properties: string;
 }
 
+/**
+ * Open a SQLite database for the current runtime.
+ *
+ * D1 Option C chose `node:sqlite` (built-in on Node >= 22) as the portability
+ * target. Node provides `DatabaseSync`; Bun's runtime does not implement
+ * `node:sqlite`, so under `bun test` and inside the Bun-compiled binary we
+ * fall back to Bun's `Database` from `bun:sqlite`. Both expose the same
+ * `exec` / `prepare` / `run` / `get` / `all` surface used below.
+ *
+ * Both imports are dynamic so that (a) merely loading this module never
+ * requires either built-in to be present (important for the compiled binary's
+ * default falkordblite path) and (b) no static Bun-module import specifier is
+ * introduced (keeping ts/src/ free of Bun-specific import specifiers per
+ * VAL-PORT-001). The create-on-open option is bun:sqlite-specific (node:sqlite's
+ * DatabaseSync ctor has no such option — it creates the file by default); it is
+ * required so bun:sqlite reopens a path that has stale -wal/-shm sidecar files
+ * left by a prior close.
+ */
+type SqliteDatabase = DatabaseSync;
+
+async function openSqliteDatabase(dbPath: string): Promise<SqliteDatabase> {
+  try {
+    const mod = await import("node:sqlite");
+    return new mod.DatabaseSync(dbPath) as SqliteDatabase;
+  } catch {
+    // Bun runtime: node:sqlite is unavailable; fall back to bun:sqlite.
+    const mod = await import("bun:sqlite") as unknown as {
+      Database: new (path: string, options?: { create?: boolean }) => SqliteDatabase;
+    };
+    return new mod.Database(dbPath, { create: true });
+  }
+}
+
 export class SQLiteBackend implements GraphBackend {
   dbPath: string;
-  db: BunDatabase | null = null;
+  db: SqliteDatabase | null = null;
   _connected = false;
 
   constructor(dbPath?: string) {
@@ -63,7 +102,7 @@ export class SQLiteBackend implements GraphBackend {
 
   async connect(): Promise<boolean> {
     try {
-      this.db = new BunDatabase(this.dbPath, { create: true });
+      this.db = await openSqliteDatabase(this.dbPath);
       this.db.exec("PRAGMA journal_mode=WAL;");
       this.db.exec("PRAGMA foreign_keys=ON;");
       this._connected = true;
@@ -77,6 +116,16 @@ export class SQLiteBackend implements GraphBackend {
 
   async disconnect(): Promise<void> {
     if (this.db) {
+      // Checkpoint and truncate the WAL before closing so all written data is
+      // flushed into the main database file and the -wal sidecar is emptied.
+      // This makes the main .db file self-contained after close, which matters
+      // for tests / callers that delete only the main file (leaving a stale
+      // non-empty -wal would corrupt the next open).
+      try {
+        this.db.exec("PRAGMA wal_checkpoint(TRUNCATE);");
+      } catch {
+        // ignore checkpoint errors (e.g. db already closing) — close anyway
+      }
       this.db.close();
       this.db = null;
     }
@@ -162,7 +211,7 @@ export class SQLiteBackend implements GraphBackend {
     };
     if (this._connected && this.db) {
       try {
-        const row = this.db.query("SELECT COUNT(*) as count FROM memories").get() as Record<string, unknown>;
+        const row = this.db.prepare("SELECT COUNT(*) as count FROM memories").get() as Record<string, unknown>;
         info["statistics"] = { memory_count: row["count"] };
       } catch (err) {
         info["warning"] = String(err);
@@ -195,7 +244,7 @@ export class SQLiteBackend implements GraphBackend {
 
     try {
       this.db
-        .query(
+        .prepare(
           `INSERT OR REPLACE INTO memories
            (id, type, title, content, summary, tags, importance, confidence, effectiveness,
             usage_count, created_at, updated_at, last_accessed, version, updated_by, context)
@@ -231,7 +280,7 @@ export class SQLiteBackend implements GraphBackend {
   async getMemory(memoryId: string, _includeRelationships = true): Promise<Memory | null> {
     if (!this.db) throw new DatabaseConnectionError("Not connected");
     const row = this.db
-      .query("SELECT * FROM memories WHERE id = ?")
+      .prepare("SELECT * FROM memories WHERE id = ?")
       .get(memoryId) as Record<string, unknown> | null;
     if (!row) return null;
     return rowToMemory(row);
@@ -283,7 +332,7 @@ export class SQLiteBackend implements GraphBackend {
     params.push(searchQuery.offset ?? 0);
 
     const rows = this.db
-      .query(
+      .prepare(
         `SELECT * FROM memories WHERE ${whereClause} ORDER BY importance DESC, created_at DESC LIMIT ? OFFSET ?`
       )
       .all(...(params as any[])) as Record<string, unknown>[];
@@ -299,7 +348,7 @@ export class SQLiteBackend implements GraphBackend {
     const contextJson = memory.context ? JSON.stringify(memory.context) : null;
 
     const result = this.db
-      .query(
+      .prepare(
         `UPDATE memories SET
          type = ?, title = ?, content = ?, summary = ?, tags = ?,
          importance = ?, confidence = ?, effectiveness = ?,
@@ -331,8 +380,8 @@ export class SQLiteBackend implements GraphBackend {
   async deleteMemory(memoryId: string): Promise<boolean> {
     if (!this.db) throw new DatabaseConnectionError("Not connected");
     // Delete relationships first
-    this.db.query("DELETE FROM relationships WHERE from_id = ? OR to_id = ?").run(memoryId, memoryId);
-    const result = this.db.query("DELETE FROM memories WHERE id = ?").run(memoryId);
+    this.db.prepare("DELETE FROM relationships WHERE from_id = ? OR to_id = ?").run(memoryId, memoryId);
+    const result = this.db.prepare("DELETE FROM memories WHERE id = ?").run(memoryId);
     return result.changes > 0;
   }
 
@@ -349,8 +398,8 @@ export class SQLiteBackend implements GraphBackend {
     const props = properties ?? createRelationshipProperties();
 
     // Check both memories exist
-    const fromExists = this.db.query("SELECT id FROM memories WHERE id = ?").get(fromMemoryId);
-    const toExists = this.db.query("SELECT id FROM memories WHERE id = ?").get(toMemoryId);
+    const fromExists = this.db.prepare("SELECT id FROM memories WHERE id = ?").get(fromMemoryId);
+    const toExists = this.db.prepare("SELECT id FROM memories WHERE id = ?").get(toMemoryId);
     if (!fromExists || !toExists) {
       throw new RelationshipError("One or both memories not found", {
         from_id: fromMemoryId,
@@ -359,7 +408,7 @@ export class SQLiteBackend implements GraphBackend {
     }
 
     this.db
-      .query(
+      .prepare(
         `INSERT INTO relationships
          (id, from_id, to_id, rel_type, strength, confidence, context, evidence_count,
           success_rate, created_at, last_validated, validation_count, counter_evidence_count,
@@ -416,7 +465,7 @@ export class SQLiteBackend implements GraphBackend {
           params.push(...relTypes);
         }
 
-        const rows = this.db.query(query).all(...(params as any[])) as RelRow[];
+        const rows = this.db.prepare(query).all(...(params as any[])) as unknown as RelRow[];
 
         for (const row of rows) {
           const otherId = row.from_id === currentId ? row.to_id : row.from_id;
@@ -461,16 +510,16 @@ export class SQLiteBackend implements GraphBackend {
   async getMemoryStatistics(): Promise<Record<string, unknown>> {
     if (!this.db) throw new DatabaseConnectionError("Not connected");
 
-    const totalRow = this.db.query("SELECT COUNT(*) as count FROM memories").get() as Record<string, number>;
-    const totalRels = this.db.query("SELECT COUNT(*) as count FROM relationships").get() as Record<string, number>;
+    const totalRow = this.db.prepare("SELECT COUNT(*) as count FROM memories").get() as Record<string, number>;
+    const totalRels = this.db.prepare("SELECT COUNT(*) as count FROM relationships").get() as Record<string, number>;
     const byType = this.db
-      .query("SELECT type, COUNT(*) as count FROM memories GROUP BY type ORDER BY count DESC")
+      .prepare("SELECT type, COUNT(*) as count FROM memories GROUP BY type ORDER BY count DESC")
       .all() as Record<string, unknown>[];
     const avgImp = this.db
-      .query("SELECT AVG(importance) as avg_importance FROM memories")
+      .prepare("SELECT AVG(importance) as avg_importance FROM memories")
       .get() as Record<string, number>;
     const avgConf = this.db
-      .query("SELECT AVG(confidence) as avg_confidence FROM memories")
+      .prepare("SELECT AVG(confidence) as avg_confidence FROM memories")
       .get() as Record<string, number>;
 
     const memoriesByType: Record<string, number> = {};
@@ -495,7 +544,7 @@ export class SQLiteBackend implements GraphBackend {
     const cutoffIso = cutoff.toISOString();
 
     const recentRows = this.db
-      .query("SELECT * FROM memories WHERE created_at >= ? ORDER BY created_at DESC LIMIT 50")
+      .prepare("SELECT * FROM memories WHERE created_at >= ? ORDER BY created_at DESC LIMIT 50")
       .all(cutoffIso) as Record<string, unknown>[];
 
     const recentMemories = recentRows.map(rowToMemory).filter((m): m is Memory => m !== null);
@@ -507,7 +556,7 @@ export class SQLiteBackend implements GraphBackend {
 
     // Find unresolved problems (type=problem, no SOLVES relationship pointing to them)
     const problemRows = this.db
-      .query(
+      .prepare(
         `SELECT m.* FROM memories m
          WHERE m.type = 'problem'
          AND m.id NOT IN (SELECT to_id FROM relationships WHERE rel_type = 'SOLVES')

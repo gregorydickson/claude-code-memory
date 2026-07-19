@@ -12,14 +12,14 @@
 
 import { randomUUID } from "node:crypto";
 
-import type { GraphBackend } from "../backends/index.js";
+import type { GraphBackend } from "../backends/index.ts";
 import {
   createMemory,
   createRelationshipProperties,
   MemoryType,
   SearchQuerySchema,
   type Memory,
-} from "../models.js";
+} from "../models.ts";
 
 // ---------------------------------------------------------------------------
 // Interfaces

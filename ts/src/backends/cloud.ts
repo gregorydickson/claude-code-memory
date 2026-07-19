@@ -5,22 +5,22 @@
  * team collaboration, and cloud-based memory storage.
  */
 
-import { Config } from "../config.js";
+import { Config } from "../config.ts";
 import {
   type Memory,
   type Relationship,
   type RelationshipProperties,
   type SearchQuery,
-} from "../models.js";
+} from "../models.ts";
 import {
   type GraphBackend,
   type HealthCheckResult,
-} from "./base.js";
+} from "./base.ts";
 import {
   DatabaseConnectionError,
   MemoryNotFoundError,
   ValidationError,
-} from "../errors.js";
+} from "../errors.ts";
 
 // ---------------------------------------------------------------------------
 // Circuit breaker
@@ -277,7 +277,7 @@ export class CloudRESTAdapter implements GraphBackend {
       console.warn(
         `${logPrefix}, retrying in ${backoff}s (attempt ${retryCount + 1}/${Config.CLOUD_MAX_RETRIES})`
       );
-      await Bun.sleep(backoff * 1000);
+      await new Promise((resolve) => setTimeout(resolve, backoff * 1000));
       return this.request(method, path, body, params, retryCount + 1);
     }
     throw new DatabaseConnectionError(errorMessage);

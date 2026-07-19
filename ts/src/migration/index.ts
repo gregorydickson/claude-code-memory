@@ -12,6 +12,6 @@ export {
   validateBackendConfig,
   createMigrationOptions,
   MigrationError,
-} from "./models.js";
+} from "./models.ts";
 
-export { MigrationManager } from "./manager.js";
+export { MigrationManager } from "./manager.ts";

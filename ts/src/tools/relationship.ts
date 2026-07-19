@@ -4,11 +4,11 @@
  * create_relationship, get_related_memories
  */
 
-import type { IMemoryDatabase } from "../database.js";
-import { createRelationshipProperties, isRelationshipType } from "../models.js";
-import { validateRelationshipInput } from "../utils/validation.js";
-import { extractContextStructure } from "../utils/context-extractor.js";
-import { handleToolErrors, neverThrowBoundary } from "./error-handling.js";
+import type { IMemoryDatabase } from "../database.ts";
+import { createRelationshipProperties, isRelationshipType } from "../models.ts";
+import { validateRelationshipInput } from "../utils/validation.ts";
+import { extractContextStructure } from "../utils/context-extractor.ts";
+import { handleToolErrors, neverThrowBoundary } from "./error-handling.ts";
 
 const _handleCreateRelationship = handleToolErrors(
   "create relationship",

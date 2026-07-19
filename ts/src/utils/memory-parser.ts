@@ -5,12 +5,12 @@
  */
 
 import {
-  Memory,
-  MemoryContext,
+  type Memory,
+  type MemoryContext,
   MemoryType,
   isMemoryType,
   createMemory,
-} from "../models.js";
+} from "../models.ts";
 
 /**
  * Convert database node properties to a Memory object.

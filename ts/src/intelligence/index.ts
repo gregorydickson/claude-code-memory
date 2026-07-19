@@ -18,7 +18,7 @@ export {
   extractEntities,
   linkEntities,
   type Entity,
-} from "./entity-extraction.js";
+} from "./entity-extraction.ts";
 
 export {
   PatternRecognizer,
@@ -26,7 +26,7 @@ export {
   extractPatterns,
   suggestPatterns,
   type Pattern,
-} from "./pattern-recognition.js";
+} from "./pattern-recognition.ts";
 
 export {
   TemporalMemory,
@@ -37,7 +37,7 @@ export {
   type MemoryState,
   type EntityChange,
   type VersionDiff,
-} from "./temporal.js";
+} from "./temporal.ts";
 
 export {
   ContextRetriever,
@@ -48,4 +48,4 @@ export {
   type SourceMemory,
   type ProjectSummary,
   type SessionContext,
-} from "./context-retrieval.js";
+} from "./context-retrieval.ts";

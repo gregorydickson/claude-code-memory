@@ -13,15 +13,15 @@ import type {
   RelationshipProperties,
   SearchQuery,
   PaginatedResult,
-} from "./models.js";
+} from "./models.ts";
 import {
   MemoryNotFoundError,
   RelationshipError,
   ValidationError,
   DatabaseConnectionError,
-} from "./errors.js";
-import type { GraphBackend } from "./backends/index.js";
-import { createRelationshipProperties } from "./models.js";
+} from "./errors.ts";
+import type { GraphBackend } from "./backends/index.ts";
+import { createRelationshipProperties } from "./models.ts";
 
 export interface IMemoryDatabase {
   initializeSchema(): Promise<void>;

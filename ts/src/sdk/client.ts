@@ -6,7 +6,7 @@
  * client class is provided that uses native `fetch` and async/await.
  *
  * Usage:
- *   import { MemoryGraphClient } from "./sdk/index.js";
+ *   import { MemoryGraphClient } from "./sdk/index.ts";
  *
  *   const client = new MemoryGraphClient({ apiKey: "mgraph_..." });
  *   const memory = await client.createMemory({
@@ -24,7 +24,7 @@
  *   }
  */
 
-import type { Memory, MemoryCreate, MemoryUpdate, RelatedMemory, Relationship, RelationshipCreate } from "./models.js";
+import type { Memory, MemoryCreate, MemoryUpdate, RelatedMemory, Relationship, RelationshipCreate } from "./models.ts";
 import {
   AuthenticationError,
   MemoryGraphError,
@@ -32,7 +32,7 @@ import {
   RateLimitError,
   ServerError,
   ValidationError,
-} from "./exceptions.js";
+} from "./exceptions.ts";
 
 export interface MemoryGraphClientOptions {
   /** MemoryGraph API key (starts with 'mgraph_'). Falls back to MEMORYGRAPH_API_KEY env var. */

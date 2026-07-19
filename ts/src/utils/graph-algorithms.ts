@@ -5,13 +5,13 @@
  * on memory relationships.
  */
 
-import type { RelationshipType } from "../models.js";
+import type { RelationshipType } from "../models.ts";
 
 export interface MemoryDBLike {
   getRelatedMemories(
     memoryId: string,
     opts?: { relationshipTypes?: string[]; maxDepth?: number }
-  ): Promise<[import("../models.js").Memory, import("../models.js").Relationship][]>;
+  ): Promise<[import("../models.ts").Memory, import("../models.ts").Relationship][]>;
 }
 
 /**

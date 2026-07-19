@@ -2,11 +2,11 @@
  * Pagination utilities for working with memories across different backends.
  */
 
-import type { Memory, SearchQuery } from "../models.js";
+import type { Memory, SearchQuery } from "../models.ts";
 
 export interface DBLike {
   searchMemories(query: SearchQuery): Promise<Memory[]>;
-  searchMemoriesPaginated?(query: SearchQuery): Promise<import("../models.js").PaginatedResult>;
+  searchMemoriesPaginated?(query: SearchQuery): Promise<import("../models.ts").PaginatedResult>;
 }
 
 export async function* paginateMemories(

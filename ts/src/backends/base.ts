@@ -11,7 +11,7 @@ import type {
   RelationshipType,
   RelationshipProperties,
   SearchQuery,
-} from "../models.js";
+} from "../models.ts";
 
 export interface HealthCheckResult {
   connected: boolean;

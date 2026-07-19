@@ -18,7 +18,7 @@ export {
   type UnresolvedProblem,
   type RelevantPattern,
   type DeprecationWarningItem,
-} from "./session-briefing.js";
+} from "./session-briefing.ts";
 
 // Predictive suggestions
 export {
@@ -27,7 +27,7 @@ export {
   suggestRelatedContext,
   type Suggestion,
   type Warning,
-} from "./predictive.js";
+} from "./predictive.ts";
 
 // Outcome learning
 export {
@@ -37,4 +37,4 @@ export {
   designDecayMechanism,
   type Outcome,
   type EffectivenessScore,
-} from "./outcome-learning.js";
+} from "./outcome-learning.ts";

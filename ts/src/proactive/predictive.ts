@@ -8,8 +8,8 @@
  * - Suggest related context
  */
 
-import type { GraphBackend } from "../backends/index.js";
-import { extractEntities, type Entity } from "../intelligence/entity-extraction.js";
+import type { GraphBackend } from "../backends/index.ts";
+import { extractEntities, type Entity } from "../intelligence/entity-extraction.ts";
 
 // ---------------------------------------------------------------------------
 // Models

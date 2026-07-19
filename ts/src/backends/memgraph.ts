@@ -6,10 +6,10 @@
  * Cypher query logic with other Bolt-protocol backends via BaseBoltBackend.
  */
 
-import { Config } from "../config.js";
-import { DatabaseConnectionError } from "../errors.js";
-import { BaseBoltBackend } from "./bolt-shared.js";
-import type { HealthCheckResult } from "./index.js";
+import { Config } from "../config.ts";
+import { DatabaseConnectionError } from "../errors.ts";
+import { BaseBoltBackend } from "./bolt-shared.ts";
+import type { HealthCheckResult } from "./index.ts";
 
 export class MemgraphBackend extends BaseBoltBackend {
   _display_name = "Memgraph";

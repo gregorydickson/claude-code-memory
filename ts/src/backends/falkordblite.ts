@@ -12,10 +12,10 @@
 import { join, dirname } from "node:path";
 import { mkdirSync } from "node:fs";
 
-import { Config } from "../config.js";
-import { DatabaseConnectionError } from "../errors.js";
-import { BaseFalkorDBBackend } from "./falkordb-shared.js";
-import type { HealthCheckResult } from "./index.js";
+import { Config } from "../config.ts";
+import { DatabaseConnectionError } from "../errors.ts";
+import { BaseFalkorDBBackend } from "./falkordb-shared.ts";
+import type { HealthCheckResult } from "./index.ts";
 
 export class FalkorDBLiteBackend extends BaseFalkorDBBackend {
   _display_name = "FalkorDBLite";

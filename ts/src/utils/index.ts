@@ -2,11 +2,11 @@
  * Utils barrel export.
  */
 
-export * from "./datetime.js";
-export * from "./memory-parser.js";
-export * from "./validation.js";
-export * from "./project-detection.js";
-export * from "./context-extractor.js";
-export * from "./graph-algorithms.js";
-export * from "./pagination.js";
-export * from "./export-import.js";
+export * from "./datetime.ts";
+export * from "./memory-parser.ts";
+export * from "./validation.ts";
+export * from "./project-detection.ts";
+export * from "./context-extractor.ts";
+export * from "./graph-algorithms.ts";
+export * from "./pagination.ts";
+export * from "./export-import.ts";

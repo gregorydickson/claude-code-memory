@@ -1,4 +1,4 @@
-#!/usr/bin/env bun
+#!/usr/bin/env node
 /**
  * MemoryGraph CLI - Command-line interface for graph-based memory management.
  *
@@ -8,62 +8,65 @@
 
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 
-import { Config, TOOL_PROFILES, type BackendType } from "./config.js";
-import { BackendFactory } from "./backends/factory.js";
-import { MemoryDatabase, CloudMemoryDatabase, type IMemoryDatabase } from "./database.js";
-import { CloudRESTAdapter } from "./backends/cloud.js";
+import { Config, TOOL_PROFILES, type BackendType } from "./config.ts";
+import { BackendFactory } from "./backends/factory.ts";
+import { MemoryDatabase, CloudMemoryDatabase, type IMemoryDatabase } from "./database.ts";
+import { CloudRESTAdapter } from "./backends/cloud.ts";
 
-import { handleStoreMemory, handleGetMemory, handleUpdateMemory, handleDeleteMemory } from "./tools/memory.js";
-import { handleSearchMemories, handleRecallMemories, handleContextualSearch } from "./tools/search.js";
-import { handleCreateRelationship, handleGetRelatedMemories } from "./tools/relationship.js";
+import { handleStoreMemory, handleGetMemory, handleUpdateMemory, handleDeleteMemory } from "./tools/memory.ts";
+import { handleSearchMemories, handleRecallMemories, handleContextualSearch } from "./tools/search.ts";
+import { handleCreateRelationship, handleGetRelatedMemories } from "./tools/relationship.ts";
 import {
   handleGetMemoryStatistics,
   handleGetRecentActivity,
   handleSearchRelationshipsByContext,
-} from "./tools/activity.js";
+} from "./tools/activity.ts";
 import {
   handleQueryAsOf,
   handleGetRelationshipHistory,
   handleWhatChanged,
-} from "./tools/temporal.js";
-import { surfaceGenericError } from "./tools/error-handling.js";
+} from "./tools/temporal.ts";
+import { surfaceGenericError } from "./tools/error-handling.ts";
 
-import { exportToJson, importFromJson, exportToMarkdown } from "./utils/export-import.js";
+import { exportToJson, importFromJson, exportToMarkdown } from "./utils/export-import.ts";
 import {
   MigrationManager,
   backendConfigFromEnv,
   createMigrationOptions,
   type BackendConfig,
-} from "./migration/index.js";
+} from "./migration/index.ts";
 
 // Intelligence, analytics, proactive, integration
-import { extractEntities, linkEntities } from "./intelligence/entity-extraction.js";
-import { findSimilarProblems, suggestPatterns } from "./intelligence/pattern-recognition.js";
-import { getContext } from "./intelligence/context-retrieval.js";
+import { extractEntities, linkEntities } from "./intelligence/entity-extraction.ts";
+import { findSimilarProblems, suggestPatterns } from "./intelligence/pattern-recognition.ts";
+import { getContext } from "./intelligence/context-retrieval.ts";
 import {
   getMemoryGraphVisualization,
   analyzeSolutionSimilarity,
   recommendLearningPaths,
   identifyKnowledgeGaps,
-} from "./analytics/advanced-queries.js";
+} from "./analytics/advanced-queries.ts";
 import {
   generateSessionBriefing,
   formatBriefingAsText,
-} from "./proactive/session-briefing.js";
-import { predictNeeds, warnPotentialIssues } from "./proactive/predictive.js";
-import { recordOutcome } from "./proactive/outcome-learning.js";
-import { captureTaskContext } from "./integration/context-capture.js";
-import { detectProject, analyzeCodebase } from "./integration/project-analysis.js";
-import { trackWorkflow, suggestWorkflow } from "./integration/workflow-tracking.js";
+} from "./proactive/session-briefing.ts";
+import { predictNeeds, warnPotentialIssues } from "./proactive/predictive.ts";
+import { recordOutcome } from "./proactive/outcome-learning.ts";
+import { captureTaskContext } from "./integration/context-capture.ts";
+import { detectProject, analyzeCodebase } from "./integration/project-analysis.ts";
+import { trackWorkflow, suggestWorkflow } from "./integration/workflow-tracking.ts";
 
 const VERSION = "0.13.0";
 
 /** Error that signals the CLI should exit with a specific code.Thrown from
  *  inside try blocks so that `finally { await close() }` runs before exit. */
 class ExitError extends Error {
-  constructor(public code: number) {
+  code: number;
+  constructor(code: number) {
     super(`Exit ${code}`);
+    this.code = code;
     this.name = "ExitError";
   }
 }
@@ -1402,7 +1405,39 @@ async function cmdWorkflow(args: string[]): Promise<void> {
 // Entry point
 // ---------------------------------------------------------------------------
 
-if (import.meta.main) {
+// Node-safe entry guard (replaces the former Bun-only main-module check so the
+// CLI runs under both Node and Bun, and as a Bun-compiled binary). cli.ts is
+// only ever loaded as the entry point — it is never imported as a module by
+// the library — but tests may import it, so the guard must NOT trigger on
+// import.
+//
+// 1. Direct script run (`node src/cli.ts …` / `bun run src/cli.ts …`):
+//    process.argv[1] is the script path and matches import.meta.url.
+// 2. Bun runtime, including the Bun-compiled binary (`./memorygraph …`):
+//    `Bun.main` is the runtime's authoritative entry-module path. Under Node,
+//    the global `Bun` is undefined so this branch is skipped (the direct-script
+//    check above handles Node). This correctly returns false when cli.ts is
+//    imported as a module (e.g. by tests), which the argv[1] check alone
+//    cannot distinguish from the compiled-binary case.
+const isEntry = (() => {
+  try {
+    const arg1 = process.argv[1];
+    if (arg1 && import.meta.url === pathToFileURL(arg1).href) return true;
+  } catch {
+    // ignore — fall through
+  }
+  try {
+    const bunGlobal = (globalThis as { Bun?: { main?: string } }).Bun;
+    if (bunGlobal && typeof bunGlobal.main === "string") {
+      return import.meta.url === pathToFileURL(bunGlobal.main).href;
+    }
+  } catch {
+    // ignore — not running under Bun
+  }
+  return false;
+})();
+
+if (isEntry) {
   main().catch((err) => {
     console.error(`Fatal: ${err instanceof Error ? err.message : String(err)}`);
     process.exit(1);

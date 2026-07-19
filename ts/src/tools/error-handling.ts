@@ -25,7 +25,7 @@ import {
   MemoryNotFoundError,
   RelationshipError,
   ValidationError,
-} from "../errors.js";
+} from "../errors.ts";
 
 /**
  * Debug-log the full error (message + stack) so operators can diagnose

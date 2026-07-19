@@ -6,9 +6,9 @@
  * - what_changed: Show relationship changes since a specific time
  */
 
-import type { IMemoryDatabase } from "../database.js";
-import type { Memory, Relationship } from "../models.js";
-import { handleToolErrors, neverThrowBoundary } from "./error-handling.js";
+import type { IMemoryDatabase } from "../database.ts";
+import type { Memory, Relationship } from "../models.ts";
+import { handleToolErrors, neverThrowBoundary } from "./error-handling.ts";
 
 export interface QueryAsOfArgs {
   memory_id: string;

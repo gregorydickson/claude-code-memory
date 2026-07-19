@@ -2,18 +2,18 @@
  * Backends barrel export.
  */
 
-export type { GraphBackend, HealthCheckResult } from "./base.js";
-export { BaseFalkorDBBackend } from "./falkordb-shared.js";
-export { FalkorDBLiteBackend } from "./falkordblite.js";
-export { FalkorDBBackend } from "./falkordb.js";
-export { BaseBoltBackend } from "./bolt-shared.js";
-export { MemgraphBackend } from "./memgraph.js";
-export { CloudRESTAdapter, CloudBackend, CircuitBreaker } from "./cloud.js";
+export type { GraphBackend, HealthCheckResult } from "./base.ts";
+export { BaseFalkorDBBackend } from "./falkordb-shared.ts";
+export { FalkorDBLiteBackend } from "./falkordblite.ts";
+export { FalkorDBBackend } from "./falkordb.ts";
+export { BaseBoltBackend } from "./bolt-shared.ts";
+export { MemgraphBackend } from "./memgraph.ts";
+export { CloudRESTAdapter, CloudBackend, CircuitBreaker } from "./cloud.ts";
 export {
   CloudBackendError,
   AuthenticationError,
   UsageLimitExceeded,
   RateLimitExceeded,
   CircuitBreakerOpenError,
-} from "./cloud.js";
-export { SQLiteBackend } from "./sqlite.js";
+} from "./cloud.ts";
+export { SQLiteBackend } from "./sqlite.ts";

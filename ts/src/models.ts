@@ -365,4 +365,4 @@ export function createRelationshipProperties(
 /**
  * Re-export errors for convenience.
  */
-export * from "./errors.js";
+export * from "./errors.ts";

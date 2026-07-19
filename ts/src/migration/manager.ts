@@ -21,13 +21,13 @@ import {
   type VerificationResult,
   validateBackendConfig,
   MigrationError,
-} from "./models.js";
-import { BackendFactory } from "../backends/factory.js";
-import { MemoryDatabase, CloudMemoryDatabase, type IMemoryDatabase } from "../database.js";
-import { exportToJson, importFromJson } from "../utils/export-import.js";
-import { getAllMemories, countMemories } from "../utils/pagination.js";
-import type { GraphBackend } from "../backends/index.js";
-import type { Memory } from "../models.js";
+} from "./models.ts";
+import { BackendFactory } from "../backends/factory.ts";
+import { MemoryDatabase, CloudMemoryDatabase, type IMemoryDatabase } from "../database.ts";
+import { exportToJson, importFromJson } from "../utils/export-import.ts";
+import { getAllMemories, countMemories } from "../utils/pagination.ts";
+import type { GraphBackend } from "../backends/index.ts";
+import type { Memory } from "../models.ts";
 
 export class MigrationManager {
   async migrate(

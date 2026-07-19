@@ -8,7 +8,7 @@
 
 import { randomUUID } from "node:crypto";
 
-import { Config } from "../config.js";
+import { Config } from "../config.ts";
 import {
   type Memory,
   type Relationship,
@@ -17,18 +17,18 @@ import {
   memoryToNodeProperties,
   createRelationshipProperties,
   ALL_RELATIONSHIP_TYPES,
-} from "../models.js";
+} from "../models.ts";
 import {
   type GraphBackend,
   type HealthCheckResult,
-} from "./base.js";
+} from "./base.ts";
 import {
   DatabaseConnectionError,
   RelationshipError,
   TimeoutError,
   ValidationError,
-} from "../errors.js";
-import { parseMemoryFromProperties } from "../utils/memory-parser.js";
+} from "../errors.ts";
+import { parseMemoryFromProperties } from "../utils/memory-parser.ts";
 
 /** Maximum traversal depth for relationship queries. */
 const MAX_TRAVERSAL_DEPTH = 10;

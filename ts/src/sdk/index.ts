@@ -2,7 +2,7 @@
  * MemoryGraph SDK - TypeScript client library for the MemoryGraph Cloud API.
  *
  * Usage:
- *   import { MemoryGraphClient } from "./sdk/index.js";
+ *   import { MemoryGraphClient } from "./sdk/index.ts";
  *
  *   const client = new MemoryGraphClient({ apiKey: "mgraph_..." });
  *   const memory = await client.createMemory({
@@ -17,7 +17,7 @@
  */
 
 // Client
-export { MemoryGraphClient } from "./client.js";
+export { MemoryGraphClient } from "./client.ts";
 export type {
   MemoryGraphClientOptions,
   CreateMemoryParams,
@@ -26,7 +26,7 @@ export type {
   RecallMemoriesParams,
   CreateRelationshipParams,
   GetRelatedMemoriesParams,
-} from "./client.js";
+} from "./client.ts";
 
 // Models
 export {
@@ -39,7 +39,7 @@ export {
   type RelationshipCreate,
   type SearchResult,
   type RelatedMemory,
-} from "./models.js";
+} from "./models.ts";
 
 // Exceptions
 export {
@@ -49,6 +49,6 @@ export {
   NotFoundError,
   ValidationError,
   ServerError,
-} from "./exceptions.js";
+} from "./exceptions.ts";
 
 export const SDK_VERSION = "0.1.0";
