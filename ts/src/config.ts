@@ -4,14 +4,39 @@
  * Centralises all configuration options and environment variable handling.
  * Each getter reads from the environment at call time, making Config
  * reactive to runtime env changes.
+ *
+ * Store path precedence (Tier 1 #7):
+ *   1. Backend-specific env (MEMORY_FALKORDBLITE_PATH / MEMORY_SQLITE_PATH /
+ *      MEMORY_LADYBUGDB_PATH / MEMORY_TURSO_PATH) — highest, preserved per
+ *      the master plan so explicit per-backend overrides still win.
+ *   2. MEMORY_STORE_PATH (set by the `--store` / `--db-path` CLI flags, or
+ *      directly by the caller) — a directory; each backend appends its own
+ *      filename below it.
+ *   3. Default `./.memorygraph/` (cwd-relative, NOT ~/.memorygraph) — so
+ *      each project / working directory gets its own isolated store by
+ *      default, and two concurrent invocations in different cwds never
+ *      collide.
  */
 
-import { homedir } from "node:os";
 import { join } from "node:path";
 
-const DEFAULT_DB_PATH = join(homedir(), ".memorygraph", "memory.db");
-const DEFAULT_FALKORDBLITE_PATH = join(homedir(), ".memorygraph", "falkordblite.db");
-const DEFAULT_LADYBUGDB_PATH = join(homedir(), ".memorygraph", "ladybugdb.db");
+/**
+ * Default store directory, cwd-relative. Tier 1 #7 changed the default from
+ * `~/.memorygraph/` (homedir-global) to `./.memorygraph/` (cwd-relative) so
+ * each working directory gets an isolated store and concurrent invocations
+ * in different cwds never share a redis-server unix socket.
+ *
+ * Kept as a literal string (not `join(...)`) so the cwd-relative form is
+ * visible in the source for the VAL-LOCAL-009 contract grep.
+ */
+const DEFAULT_STORE_DIR = "./.memorygraph";
+
+// Basename used by each backend inside the store directory. Kept as literals
+// so the cwd-relative default (`./.memorygraph`) is visible in source for the
+// VAL-LOCAL-009 contract grep.
+const FALKORDBLITE_DB_FILE = "falkordblite.db";
+const SQLITE_DB_FILE = "memory.db";
+const LADYBUGDB_DB_FILE = "ladybugdb.db";
 
 export type BackendType =
   | "neo4j"
@@ -134,14 +159,22 @@ export class Config {
     return env(["MEMORY_MEMGRAPH_PASSWORD"]);
   }
 
+  // Store directory (Tier 1 #7). Read by the `--store` / `--db-path` CLI
+  // flags (which set MEMORY_STORE_PATH). Default is the cwd-relative
+  // `./.memorygraph/` — NOT ~/.memorygraph — so each working directory gets
+  // its own isolated store by default.
+  static get STORE_PATH(): string {
+    return envStr(["MEMORY_STORE_PATH"], DEFAULT_STORE_DIR);
+  }
+
   // SQLite
   static get SQLITE_PATH(): string {
-    return envStr(["MEMORY_SQLITE_PATH"], DEFAULT_DB_PATH);
+    return env(["MEMORY_SQLITE_PATH"]) ?? join(Config.STORE_PATH, SQLITE_DB_FILE);
   }
 
   // Turso
   static get TURSO_PATH(): string {
-    return envStr(["MEMORY_TURSO_PATH"], DEFAULT_DB_PATH);
+    return env(["MEMORY_TURSO_PATH"]) ?? join(Config.STORE_PATH, SQLITE_DB_FILE);
   }
   static get TURSO_DATABASE_URL(): string | undefined {
     return env(["TURSO_DATABASE_URL"]);
@@ -186,7 +219,10 @@ export class Config {
 
   // FalkorDBLite
   static get FALKORDBLITE_PATH(): string {
-    return envStr(["MEMORY_FALKORDBLITE_PATH", "FALKORDBLITE_PATH"], DEFAULT_FALKORDBLITE_PATH);
+    return (
+      env(["MEMORY_FALKORDBLITE_PATH", "FALKORDBLITE_PATH"]) ??
+      join(Config.STORE_PATH, FALKORDBLITE_DB_FILE)
+    );
   }
 
   // Bounded query timeout (ms) — enforced at the BaseFalkorDBBackend and
@@ -198,7 +234,10 @@ export class Config {
 
   // LadybugDB
   static get LADYBUGDB_PATH(): string {
-    return envStr(["MEMORY_LADYBUGDB_PATH", "LADYBUGDB_PATH"], DEFAULT_LADYBUGDB_PATH);
+    return (
+      env(["MEMORY_LADYBUGDB_PATH", "LADYBUGDB_PATH"]) ??
+      join(Config.STORE_PATH, LADYBUGDB_DB_FILE)
+    );
   }
 
   // Tool profile

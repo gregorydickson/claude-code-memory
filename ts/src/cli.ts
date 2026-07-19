@@ -215,6 +215,8 @@ COMMANDS:
 GLOBAL OPTIONS:
   --backend <type>    Backend: falkordblite (default), sqlite, falkordb, memgraph, cloud
   --profile <type>    Tool profile: core (default) or extended
+  --store <dir>       Store directory (default: ./.memorygraph/ in cwd). Alias: --db-path
+  --db-path <dir>     Alias for --store <dir>
   --help, -h          Show this help message
   --version, -v       Show version
 
@@ -233,11 +235,12 @@ EXAMPLES:
 
 ENVIRONMENT VARIABLES:
   MEMORY_BACKEND              Backend type (falkordblite|sqlite|falkordb|memgraph|cloud) [default: falkordblite]
-  MEMORY_FALKORDBLITE_PATH    FalkorDBLite database path [default: ~/.memorygraph/falkordblite.db]
+  MEMORY_STORE_PATH           Store directory (used by --store / --db-path) [default: ./.memorygraph/]
+  MEMORY_FALKORDBLITE_PATH    FalkorDBLite database path (overrides --store) [default: <STORE_PATH>/falkordblite.db]
   MEMORY_FALKORDB_HOST        FalkorDB server host [default: localhost]
   MEMORY_FALKORDB_PORT        FalkorDB server port [default: 6379]
   MEMORY_MEMGRAPH_URI         Memgraph Bolt URI [default: bolt://localhost:7687]
-  MEMORY_SQLITE_PATH          SQLite database path [default: ~/.memorygraph/memory.db]
+  MEMORY_SQLITE_PATH          SQLite database path (overrides --store) [default: <STORE_PATH>/memory.db]
   MEMORYGRAPH_API_KEY         API key for cloud backend
   MEMORYGRAPH_API_URL         Cloud API URL [default: https://graph-api.memorygraph.dev]
   MEMORY_TOOL_PROFILE         Tool profile (core|extended) [default: core]
@@ -263,9 +266,14 @@ export async function main(): Promise<void> {
     process.exit(0);
   }
 
-  // Extract --backend and --profile global options
+  // Extract --backend, --profile, --store, and --db-path global options.
+  // `--store` and `--db-path` are aliases (Tier 1 #7): both set the
+  // MEMORY_STORE_PATH env var, which Config.STORE_PATH reads. Per-backend
+  // env vars (MEMORY_FALKORDBLITE_PATH / MEMORY_SQLITE_PATH) still take
+  // precedence over --store when set, preserving the documented override.
   let backendOverride: string | undefined;
   let profileOverride: string | undefined;
+  let storeOverride: string | undefined;
 
   for (let i = 0; i < args.length; i++) {
     if (args[i] === "--backend" && i + 1 < args.length) {
@@ -274,6 +282,19 @@ export async function main(): Promise<void> {
       i--;
     } else if (args[i] === "--profile" && i + 1 < args.length) {
       profileOverride = args[i + 1];
+      args.splice(i, 2);
+      i--;
+    } else if (args[i] === "--store" && i + 1 < args.length) {
+      storeOverride = args[i + 1];
+      args.splice(i, 2);
+      i--;
+    } else if (args[i] === "--db-path" && i + 1 < args.length) {
+      storeOverride = args[i + 1];
+      args.splice(i, 2);
+      i--;
+    } else if (args[i] === "--store-path" && i + 1 < args.length) {
+      // Accepted as a longer alias for discoverability.
+      storeOverride = args[i + 1];
       args.splice(i, 2);
       i--;
     }
@@ -285,6 +306,12 @@ export async function main(): Promise<void> {
   if (profileOverride) {
     const legacyMap: Record<string, string> = { lite: "core", standard: "extended", full: "extended" };
     process.env["MEMORY_TOOL_PROFILE"] = legacyMap[profileOverride] ?? profileOverride;
+  }
+  if (storeOverride) {
+    // --store / --db-path set the shared store directory. Each backend
+    // appends its own filename below it via Config.STORE_PATH (unless a
+    // backend-specific env var is set, which wins).
+    process.env["MEMORY_STORE_PATH"] = storeOverride;
   }
 
   const command = args[0];
