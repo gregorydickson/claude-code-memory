@@ -11,6 +11,8 @@ __pycache__/
 
 # C extensions
 *.so
+# Exception: vendored falkordblite native module (Tier 1 #5/#6 — committed binaries)
+!ts/vendor/falkordblite/**/falkordb.so
 
 # Distribution / packaging
 .Python

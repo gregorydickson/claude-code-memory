@@ -11,7 +11,8 @@
     "dev": "bun run src/cli.ts",
     "build": "bun build src/cli.ts --compile --outfile memorygraph",
     "test": "bun test",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "postinstall": "node scripts/vendor-postinstall.cjs"
   },
   "dependencies": {
     "falkordb": "^6.0.0",
@@ -36,7 +37,5 @@
     "context",
     "relationships"
   ],
-  "trustedDependencies": [
-    "falkordblite"
-  ]
+  "trustedDependencies": []
 }
