@@ -96,6 +96,65 @@ async function createDb(): Promise<{ db: IMemoryDatabase; close: () => Promise<v
   };
 }
 
+// ---------------------------------------------------------------------------
+// Sqlite fallback scoping (Tier 1 #10)
+//
+// The sqlite backend is the opt-out non-Cypher fallback. Features that
+// require Cypher (intelligence / analytics / proactive / temporal) cannot
+// be served by it. Instead of throwing, each Cypher-only CLI command prints
+// a CLEAR unsupported message and exits 0 — no stack trace, no unhandled
+// exception. Basic CRUD (store/get/update/delete/search/link/related) still
+// works on sqlite.
+//
+// The guard is two-tiered:
+//   1. `guardSqliteFallback(command)` — cheap pre-instantiation check using
+//      `Config.BACKEND`. Lets Cypher-only commands short-circuit BEFORE arg
+//      validation, so a wrong-arg invocation (e.g. `learning --goal g`) on
+//      sqlite still prints the unsupported message instead of a usage error.
+//   2. `assertCypherCapable(backend, command)` — defensive post-instantiation
+//      check using `backend.isCypherCapable()`. Catches the `auto`-fallback
+//      case (falkordblite unavailable → sqlite) and any future non-Cypher
+//      backend that is not literally named "sqlite".
+// ---------------------------------------------------------------------------
+
+const SQLITE_FALLBACK_MESSAGE = (command: string): string =>
+  `'${command}' is not supported on the sqlite fallback. ` +
+  `A Cypher-capable backend (falkordblite, falkordb, or memgraph) is required for this feature. ` +
+  `Set MEMORY_BACKEND=falkordblite (default) or another Cypher-capable backend to use it.`;
+
+/**
+ * Cheap pre-instantiation guard. Returns true (and prints the unsupported
+ * message to stdout) when the configured backend is the non-Cypher sqlite
+ * fallback, so the caller should `return` immediately. Returns false to
+ * continue normal dispatch.
+ */
+function guardSqliteFallback(command: string): boolean {
+  if (Config.BACKEND.toLowerCase() === "sqlite") {
+    console.log(SQLITE_FALLBACK_MESSAGE(command));
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Defensive post-instantiation guard. Returns true (and prints the
+ * unsupported message to stdout) when the instantiated backend is not
+ * Cypher-capable, so the caller should `return` immediately. Returns false
+ * to continue. Uses the backend's own `isCypherCapable()` method.
+ */
+function assertCypherCapable(backend: GraphBackendLike, command: string): boolean {
+  if (!backend.isCypherCapable()) {
+    console.log(SQLITE_FALLBACK_MESSAGE(command));
+    return true;
+  }
+  return false;
+}
+
+/** Minimal structural type for the backend method the guard needs. */
+interface GraphBackendLike {
+  isCypherCapable(): boolean;
+}
+
 function printConfigSummary(): void {
   const config = Config.getConfigSummary() as Record<string, any>;
   eprint(`\nMemoryGraph CLI v${VERSION}`);
@@ -866,6 +925,7 @@ async function cmdHealth(args: string[]): Promise<void> {
 }
 
 async function cmdAsOf(args: string[]): Promise<void> {
+  if (guardSqliteFallback("as-of")) return;
   const parsed = parseSimpleArgs(args);
   const positional = (parsed["_positional"] as string[]) ?? [];
 
@@ -876,6 +936,7 @@ async function cmdAsOf(args: string[]): Promise<void> {
 
   const { db, close } = await createDb();
   try {
+    if (assertCypherCapable((db as MemoryDatabase).backend, "as-of")) return;
     const result = await handleQueryAsOf(db, {
       memory_id: positional[0],
       as_of: positional[1],
@@ -889,6 +950,7 @@ async function cmdAsOf(args: string[]): Promise<void> {
 }
 
 async function cmdHistory(args: string[]): Promise<void> {
+  if (guardSqliteFallback("history")) return;
   const parsed = parseSimpleArgs(args);
   const positional = (parsed["_positional"] as string[]) ?? [];
 
@@ -899,6 +961,7 @@ async function cmdHistory(args: string[]): Promise<void> {
 
   const { db, close } = await createDb();
   try {
+    if (assertCypherCapable((db as MemoryDatabase).backend, "history")) return;
     const result = await handleGetRelationshipHistory(db, {
       memory_id: positional[0],
       relationship_types: parseList(parsed["types"]),
@@ -911,6 +974,7 @@ async function cmdHistory(args: string[]): Promise<void> {
 }
 
 async function cmdChanges(args: string[]): Promise<void> {
+  if (guardSqliteFallback("changes")) return;
   const parsed = parseSimpleArgs(args);
   const positional = (parsed["_positional"] as string[]) ?? [];
 
@@ -921,6 +985,7 @@ async function cmdChanges(args: string[]): Promise<void> {
 
   const { db, close } = await createDb();
   try {
+    if (assertCypherCapable((db as MemoryDatabase).backend, "changes")) return;
     const result = await handleWhatChanged(db, {
       since: positional[0],
     });
@@ -1052,6 +1117,7 @@ async function cmdContextualSearch(args: string[]): Promise<void> {
 // ---------------------------------------------------------------------------
 
 async function cmdEntities(args: string[]): Promise<void> {
+  if (guardSqliteFallback("entities")) return;
   const parsed = parseSimpleArgs(args);
   const positional = (parsed["_positional"] as string[]) ?? [];
 
@@ -1062,6 +1128,7 @@ async function cmdEntities(args: string[]): Promise<void> {
 
   const { db, close } = await createDb();
   try {
+    if (assertCypherCapable((db as MemoryDatabase).backend, "entities")) return;
     const memory = await db.getMemory(positional[0], false);
     if (!memory) {
       console.error(`Memory not found: ${positional[0]}`);
@@ -1096,6 +1163,7 @@ async function cmdEntities(args: string[]): Promise<void> {
 }
 
 async function cmdPatterns(args: string[]): Promise<void> {
+  if (guardSqliteFallback("patterns")) return;
   const parsed = parseSimpleArgs(args);
   const query = (parsed["query"] as string) ?? (parsed["_positional"] as string[])?.join(" ");
 
@@ -1107,6 +1175,7 @@ async function cmdPatterns(args: string[]): Promise<void> {
   const { db, close } = await createDb();
   try {
     const backend = (db as MemoryDatabase).backend;
+    if (assertCypherCapable(backend, "patterns")) return;
     const similar = await findSimilarProblems(backend, query);
     const suggestions = await suggestPatterns(backend, query);
 
@@ -1138,6 +1207,7 @@ async function cmdPatterns(args: string[]): Promise<void> {
 }
 
 async function cmdContext(args: string[]): Promise<void> {
+  if (guardSqliteFallback("context")) return;
   const parsed = parseSimpleArgs(args);
   const query = (parsed["query"] as string) ?? (parsed["_positional"] as string[])?.join(" ");
   const project = (parsed["project"] as string) ?? undefined;
@@ -1145,6 +1215,7 @@ async function cmdContext(args: string[]): Promise<void> {
   const { db, close } = await createDb();
   try {
     const backend = (db as MemoryDatabase).backend;
+    if (assertCypherCapable(backend, "context")) return;
     const result = await getContext(backend, typeof query === "string" ? query : "", 4000, project ?? null);
 
     console.log("**Intelligent Context Retrieval**\n");
@@ -1174,6 +1245,7 @@ async function cmdContext(args: string[]): Promise<void> {
 // ---------------------------------------------------------------------------
 
 async function cmdVisualize(args: string[]): Promise<void> {
+  if (guardSqliteFallback("visualize")) return;
   const parsed = parseSimpleArgs(args);
   const centerId = (parsed["center"] as string) ?? undefined;
   const depth = parseIntArg(parsed["depth"]) ?? 2;
@@ -1182,6 +1254,7 @@ async function cmdVisualize(args: string[]): Promise<void> {
   const { db, close } = await createDb();
   try {
     const backend = (db as MemoryDatabase).backend;
+    if (assertCypherCapable(backend, "visualize")) return;
     const viz = await getMemoryGraphVisualization(backend, centerId ?? null, depth, maxNodes);
 
     console.log("**Memory Graph Visualization Data**\n");
@@ -1213,6 +1286,7 @@ async function cmdVisualize(args: string[]): Promise<void> {
 }
 
 async function cmdSimilarity(args: string[]): Promise<void> {
+  if (guardSqliteFallback("similarity")) return;
   const parsed = parseSimpleArgs(args);
   const positional = (parsed["_positional"] as string[]) ?? [];
 
@@ -1224,6 +1298,7 @@ async function cmdSimilarity(args: string[]): Promise<void> {
   const { db, close } = await createDb();
   try {
     const backend = (db as MemoryDatabase).backend;
+    if (assertCypherCapable(backend, "similarity")) return;
     const topK = parseIntArg(parsed["top-k"]) ?? 5;
     const minSim = parseFloatArg(parsed["min-similarity"]) ?? 0.3;
 
@@ -1246,6 +1321,7 @@ async function cmdSimilarity(args: string[]): Promise<void> {
 }
 
 async function cmdLearning(args: string[]): Promise<void> {
+  if (guardSqliteFallback("learning")) return;
   const parsed = parseSimpleArgs(args);
   const topic = (parsed["topic"] as string) ?? (parsed["_positional"] as string[])?.join(" ") ?? "general";
   const maxPaths = parseIntArg(parsed["max-paths"]) ?? 3;
@@ -1253,6 +1329,7 @@ async function cmdLearning(args: string[]): Promise<void> {
   const { db, close } = await createDb();
   try {
     const backend = (db as MemoryDatabase).backend;
+    if (assertCypherCapable(backend, "learning")) return;
     const paths = await recommendLearningPaths(backend, topic, maxPaths);
 
     if (paths.length === 0) {
@@ -1278,12 +1355,14 @@ async function cmdLearning(args: string[]): Promise<void> {
 }
 
 async function cmdGaps(args: string[]): Promise<void> {
+  if (guardSqliteFallback("gaps")) return;
   const parsed = parseSimpleArgs(args);
   const project = (parsed["project"] as string) ?? undefined;
 
   const { db, close } = await createDb();
   try {
     const backend = (db as MemoryDatabase).backend;
+    if (assertCypherCapable(backend, "gaps")) return;
     const gaps = await identifyKnowledgeGaps(backend, project ?? null);
 
     if (gaps.length === 0) {
@@ -1309,6 +1388,7 @@ async function cmdGaps(args: string[]): Promise<void> {
 // ---------------------------------------------------------------------------
 
 async function cmdBriefing(args: string[]): Promise<void> {
+  if (guardSqliteFallback("briefing")) return;
   const parsed = parseSimpleArgs(args);
   const projectDir = (parsed["path"] as string) ?? process.cwd();
   const verbosity = (parsed["verbosity"] as "minimal" | "standard" | "detailed") ?? "standard";
@@ -1316,6 +1396,7 @@ async function cmdBriefing(args: string[]): Promise<void> {
   const { db, close } = await createDb();
   try {
     const backend = (db as MemoryDatabase).backend;
+    if (assertCypherCapable(backend, "briefing")) return;
     const briefing = await generateSessionBriefing(backend, projectDir);
 
     if (!briefing) {
@@ -1331,12 +1412,14 @@ async function cmdBriefing(args: string[]): Promise<void> {
 }
 
 async function cmdPredict(args: string[]): Promise<void> {
+  if (guardSqliteFallback("predict")) return;
   const parsed = parseSimpleArgs(args);
   const query = (parsed["query"] as string) ?? (parsed["_positional"] as string[])?.join(" ") ?? "";
 
   const { db, close } = await createDb();
   try {
     const backend = (db as MemoryDatabase).backend;
+    if (assertCypherCapable(backend, "predict")) return;
     const suggestions = await predictNeeds(backend, typeof query === "string" ? query : "");
 
     if (suggestions.length === 0) {
@@ -1358,12 +1441,14 @@ async function cmdPredict(args: string[]): Promise<void> {
 }
 
 async function cmdWarn(args: string[]): Promise<void> {
+  if (guardSqliteFallback("warn")) return;
   const parsed = parseSimpleArgs(args);
   const context = (parsed["context"] as string) ?? (parsed["_positional"] as string[])?.join(" ") ?? "";
 
   const { db, close } = await createDb();
   try {
     const backend = (db as MemoryDatabase).backend;
+    if (assertCypherCapable(backend, "warn")) return;
     const warnings = await warnPotentialIssues(backend, typeof context === "string" ? context : "");
 
     if (warnings.length === 0) {
@@ -1386,6 +1471,7 @@ async function cmdWarn(args: string[]): Promise<void> {
 }
 
 async function cmdOutcome(args: string[]): Promise<void> {
+  if (guardSqliteFallback("outcome")) return;
   const parsed = parseSimpleArgs(args);
   const positional = (parsed["_positional"] as string[]) ?? [];
 
@@ -1397,6 +1483,7 @@ async function cmdOutcome(args: string[]): Promise<void> {
   const { db, close } = await createDb();
   try {
     const backend = (db as MemoryDatabase).backend;
+    if (assertCypherCapable(backend, "outcome")) return;
     const memoryId = positional[0];
     const description = parsed["description"] as string ?? "Outcome recorded";
     const success = parsed["success"] === "true" || parsed["success"] === true;
