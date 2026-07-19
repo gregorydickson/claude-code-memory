@@ -26,6 +26,7 @@ import {
 import {
   DatabaseConnectionError,
   RelationshipError,
+  TimeoutError,
   ValidationError,
 } from "../errors.js";
 import { parseMemoryFromProperties } from "../utils/memory-parser.js";
@@ -185,12 +186,16 @@ export abstract class BaseBoltBackend implements GraphBackend {
     }
 
     const params = parameters ?? {};
+    const timeoutMs = Config.QUERY_TIMEOUT;
     const session = this.driver.session({
       defaultAccessMode: write ? "WRITE" : "READ",
     });
 
     try {
-      const result = await session.run(query, params);
+      const result: any = await this._runWithQueryTimeout(
+        () => session.run(query, params),
+        timeoutMs
+      );
       const records: Record<string, unknown>[] = [];
 
       for (const record of result.records) {
@@ -202,10 +207,39 @@ export abstract class BaseBoltBackend implements GraphBackend {
       }
       return records;
     } catch (err) {
+      if (err instanceof TimeoutError) {
+        console.error(
+          `Query timed out after ${timeoutMs}ms on ${this._display_name}: ${query.substring(0, 120)}`
+        );
+        throw err;
+      }
       console.error(`Query execution failed: ${err}`);
       throw new DatabaseConnectionError(`Query execution failed: ${err}`);
     } finally {
       await session.close();
+    }
+  }
+
+  /**
+   * Run a backend driver call with a bounded query timeout. If the call
+   * does not resolve within `timeoutMs`, reject with a typed TimeoutError.
+   */
+  private async _runWithQueryTimeout<T>(
+    fn: () => Promise<T>,
+    timeoutMs: number
+  ): Promise<T> {
+    if (!(timeoutMs > 0)) return fn();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(
+        () => reject(new TimeoutError(`Query timed out after ${timeoutMs}ms`)),
+        timeoutMs
+      );
+    });
+    try {
+      return await Promise.race([fn(), timeout]);
+    } finally {
+      if (timer) clearTimeout(timer);
     }
   }
 
@@ -341,8 +375,8 @@ export abstract class BaseBoltBackend implements GraphBackend {
         WHERE ${whereClause}
         RETURN m
         ORDER BY m.importance DESC, m.created_at DESC
-        LIMIT $limit
         SKIP $offset
+        LIMIT $limit
       `;
       parameters["limit"] = searchQuery.limit;
       parameters["offset"] = searchQuery.offset ?? 0;

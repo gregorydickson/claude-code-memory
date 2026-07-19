@@ -25,6 +25,7 @@ import {
 import {
   DatabaseConnectionError,
   RelationshipError,
+  TimeoutError,
   ValidationError,
 } from "../errors.js";
 import { parseMemoryFromProperties } from "../utils/memory-parser.js";
@@ -99,13 +100,50 @@ export abstract class BaseFalkorDBBackend implements GraphBackend {
     }
 
     const params = parameters ?? {};
+    const timeoutMs = Config.QUERY_TIMEOUT;
 
     try {
-      const result = await this.graph.query(query, params);
+      const result = await this._runWithQueryTimeout(
+        () => this.graph.query(query, { params }),
+        timeoutMs
+      );
       return this.convertFalkorDBResult(result);
     } catch (err) {
+      if (err instanceof TimeoutError) {
+        // Bounded query timeout fired — degrade to typed error, no hang.
+        console.error(
+          `Query timed out after ${timeoutMs}ms on ${this._display_name}: ${query.substring(0, 120)}`
+        );
+        throw err;
+      }
       console.error(`Query execution failed: ${err}`);
       throw new DatabaseConnectionError(`Query execution failed: ${err}`);
+    }
+  }
+
+  /**
+   * Run a backend driver call with a bounded query timeout. If the call
+   * does not resolve within `timeoutMs`, reject with a typed TimeoutError.
+   *
+   * The underlying driver call is not cancellable, but the caller sees a
+   * fast, typed degradation instead of an indefinite hang.
+   */
+  private async _runWithQueryTimeout<T>(
+    fn: () => Promise<T>,
+    timeoutMs: number
+  ): Promise<T> {
+    if (!(timeoutMs > 0)) return fn();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(
+        () => reject(new TimeoutError(`Query timed out after ${timeoutMs}ms`)),
+        timeoutMs
+      );
+    });
+    try {
+      return await Promise.race([fn(), timeout]);
+    } finally {
+      if (timer) clearTimeout(timer);
     }
   }
 
@@ -117,10 +155,12 @@ export abstract class BaseFalkorDBBackend implements GraphBackend {
     const resultSet = result.data ?? result.result_set ?? result;
     if (!Array.isArray(resultSet)) return resultList;
 
-    // Get column names from header
+    // Get column names from header (SDK uses both `headers` and `header`
+    // spellings across versions; tolerate either).
     let columnNames: string[] = [];
-    if (result.header) {
-      columnNames = result.header.map((h: any) => {
+    const headerSrc = result.headers ?? result.header;
+    if (headerSrc) {
+      columnNames = headerSrc.map((h: any) => {
         if (Array.isArray(h) && h.length >= 2) return h[1];
         return String(h);
       });
@@ -128,8 +168,15 @@ export abstract class BaseFalkorDBBackend implements GraphBackend {
 
     for (const row of resultSet) {
       if (row && typeof row === "object" && !Array.isArray(row)) {
-        // Already a dict-like object
-        resultList.push(this.convertFalkorDBValue(row));
+        // Dict-like row keyed by column name (the falkordb-ts SDK returns
+        // rows as objects like { m: <node> }). Convert EACH value so nodes
+        // and relationships are flattened to their property dicts, which is
+        // what parseMemoryFromProperties expects.
+        const record: Record<string, unknown> = {};
+        for (const [k, v] of Object.entries(row)) {
+          record[k] = this.convertFalkorDBValue(v);
+        }
+        resultList.push(record);
       } else if (Array.isArray(row) && columnNames.length > 0) {
         const record: Record<string, unknown> = {};
         for (let i = 0; i < row.length && i < columnNames.length; i++) {
@@ -146,6 +193,7 @@ export abstract class BaseFalkorDBBackend implements GraphBackend {
 
   private convertFalkorDBValue(value: any): any {
     if (value && typeof value === "object" && "properties" in value) {
+      // FalkorDB node/relationship: flatten to its property dict.
       return { ...value.properties };
     }
     return value;
@@ -158,11 +206,20 @@ export abstract class BaseFalkorDBBackend implements GraphBackend {
   async initializeSchema(): Promise<void> {
     console.log(`Initializing ${this._display_name} schema...`);
 
-    const constraints = [
-      "CREATE CONSTRAINT ON (m:Memory) ASSERT m.id IS UNIQUE",
-    ];
+    // FalkorDB v4.16.3 requires the `GRAPH.CONSTRAINT` command form (not
+    // legacy `CREATE CONSTRAINT ...`). The legacy form errors with
+    // "Invalid constraint command use the GRAPH.CONSTRAINT command instead".
+    //
+    // FalkorDB also requires a supporting exact-match index to exist on the
+    // property BEFORE a UNIQUE constraint is created (otherwise the
+    // constraint call errors with "missing supporting exact-match index").
+    // So we create the indexes first, then the constraint.
+    //
+    // We never swallow errors silently — a schema-init failure that isn't
+    // the "already exists" case is logged and propagated.
 
     const indexes = [
+      "CREATE INDEX ON :Memory(id)",
       "CREATE INDEX ON :Memory(type)",
       "CREATE INDEX ON :Memory(created_at)",
       "CREATE INDEX ON :Memory(importance)",
@@ -179,19 +236,46 @@ export abstract class BaseFalkorDBBackend implements GraphBackend {
       );
     }
 
-    for (const constraint of constraints) {
-      try {
-        await this.executeQuery(constraint, {}, true);
-      } catch (err) {
-        // Constraint may already exist
-      }
-    }
-
     for (const index of indexes) {
       try {
         await this.executeQuery(index, {}, true);
       } catch (err) {
-        // Index may already exist
+        const msg = String(err);
+        if (/already exists|already indexed/i.test(msg)) {
+          // Index already exists — benign, continue.
+          continue;
+        }
+        // Surface (do not swallow) unexpected index failures.
+        console.error(`Failed to create index (${index}): ${err}`);
+        throw new DatabaseConnectionError(
+          `Schema init failed creating index (${index}): ${err}`
+        );
+      }
+    }
+
+    // Now create the unique constraint on :Memory.id, using the v4.16.3
+    // GRAPH.CONSTRAINT command form. Prefer the SDK helper when available.
+    const constraintDesc = "unique constraint on :Memory.id";
+    try {
+      if (this.graph && typeof this.graph.constraintCreate === "function") {
+        // constraintCreate(type, entityType, label, ...properties)
+        await this.graph.constraintCreate("UNIQUE", "NODE", "Memory", "id");
+      } else {
+        await this.executeQuery(
+          "GRAPH.CONSTRAINT CREATE memorygraph UNIQUE NODE Memory PROPERTIES 1 id",
+          {},
+          true
+        );
+      }
+    } catch (err) {
+      const msg = String(err);
+      if (/already exists/i.test(msg)) {
+        console.log(`Constraint already exists (${constraintDesc}); skipping.`);
+      } else {
+        console.error(`Failed to create constraint (${constraintDesc}): ${err}`);
+        throw new DatabaseConnectionError(
+          `Schema init failed creating constraint (${constraintDesc}): ${err}`
+        );
       }
     }
 
@@ -295,8 +379,8 @@ export abstract class BaseFalkorDBBackend implements GraphBackend {
         WHERE ${whereClause}
         RETURN m
         ORDER BY m.importance DESC, m.created_at DESC
-        LIMIT $limit
         SKIP $offset
+        LIMIT $limit
       `;
       parameters["limit"] = searchQuery.limit;
       parameters["offset"] = searchQuery.offset ?? 0;

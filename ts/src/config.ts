@@ -189,6 +189,13 @@ export class Config {
     return envStr(["MEMORY_FALKORDBLITE_PATH", "FALKORDBLITE_PATH"], DEFAULT_FALKORDBLITE_PATH);
   }
 
+  // Bounded query timeout (ms) — enforced at the BaseFalkorDBBackend and
+  // BaseBoltBackend executeQuery choke points so a hung query degrades to a
+  // typed TimeoutError instead of hanging the caller. Default 5000ms.
+  static get QUERY_TIMEOUT(): number {
+    return envInt(["MEMORYGRAPH_QUERY_TIMEOUT"], 5000);
+  }
+
   // LadybugDB
   static get LADYBUGDB_PATH(): string {
     return envStr(["MEMORY_LADYBUGDB_PATH", "LADYBUGDB_PATH"], DEFAULT_LADYBUGDB_PATH);

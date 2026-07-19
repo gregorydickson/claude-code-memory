@@ -7,7 +7,7 @@
 import type { IMemoryDatabase } from "../database.js";
 import type { Memory } from "../models.js";
 import { detectProjectContext } from "../utils/project-detection.js";
-import { handleToolErrors } from "./error-handling.js";
+import { handleToolErrors, neverThrowBoundary } from "./error-handling.js";
 
 function getMemoryAttr(memory: Memory | Record<string, unknown>, attr: string, defaultVal?: unknown): unknown {
   if (typeof memory === "object" && memory !== null && attr in memory) {
@@ -16,7 +16,7 @@ function getMemoryAttr(memory: Memory | Record<string, unknown>, attr: string, d
   return defaultVal;
 }
 
-export const handleGetMemoryStatistics = handleToolErrors(
+const _handleGetMemoryStatistics = handleToolErrors(
   "get memory statistics",
   async (db: IMemoryDatabase, _args: Record<string, unknown>): Promise<string> => {
     const stats = await db.getMemoryStatistics();
@@ -54,8 +54,9 @@ export const handleGetMemoryStatistics = handleToolErrors(
     return text;
   }
 );
+export const handleGetMemoryStatistics = neverThrowBoundary("get memory statistics", _handleGetMemoryStatistics);
 
-export const handleGetRecentActivity = handleToolErrors(
+const _handleGetRecentActivity = handleToolErrors(
   "get recent activity",
   async (db: IMemoryDatabase, args: Record<string, unknown>): Promise<string> => {
     if (!db.getRecentActivity) {
@@ -127,8 +128,9 @@ export const handleGetRecentActivity = handleToolErrors(
     return text;
   }
 );
+export const handleGetRecentActivity = neverThrowBoundary("get recent activity", _handleGetRecentActivity);
 
-export const handleSearchRelationshipsByContext = handleToolErrors(
+const _handleSearchRelationshipsByContext = handleToolErrors(
   "search relationships by context",
   async (db: IMemoryDatabase, args: Record<string, unknown>): Promise<string> => {
     const memoryId = args["memory_id"] as string | undefined;
@@ -202,4 +204,8 @@ export const handleSearchRelationshipsByContext = handleToolErrors(
 
     return text;
   }
+);
+export const handleSearchRelationshipsByContext = neverThrowBoundary(
+  "search relationships by context",
+  _handleSearchRelationshipsByContext
 );

@@ -7,9 +7,9 @@
 import type { IMemoryDatabase } from "../database.js";
 import type { SearchQuery, Memory } from "../models.js";
 import { validateSearchInput } from "../utils/validation.js";
-import { handleToolErrors } from "./error-handling.js";
+import { handleToolErrors, neverThrowBoundary } from "./error-handling.js";
 
-export const handleSearchMemories = handleToolErrors(
+const _handleSearchMemories = handleToolErrors(
   "search memories",
   async (db: IMemoryDatabase, args: Record<string, unknown>): Promise<string> => {
     validateSearchInput(args);
@@ -53,8 +53,9 @@ export const handleSearchMemories = handleToolErrors(
     return text;
   }
 );
+export const handleSearchMemories = neverThrowBoundary("search memories", _handleSearchMemories);
 
-export const handleRecallMemories = handleToolErrors(
+const _handleRecallMemories = handleToolErrors(
   "recall memories",
   async (db: IMemoryDatabase, args: Record<string, unknown>): Promise<string> => {
     validateSearchInput(args);
@@ -139,8 +140,9 @@ export const handleRecallMemories = handleToolErrors(
     return text;
   }
 );
+export const handleRecallMemories = neverThrowBoundary("recall memories", _handleRecallMemories);
 
-export const handleContextualSearch = handleToolErrors(
+const _handleContextualSearch = handleToolErrors(
   "perform contextual search",
   async (db: IMemoryDatabase, args: Record<string, unknown>): Promise<string> => {
     validateSearchInput(args);
@@ -210,3 +212,4 @@ export const handleContextualSearch = handleToolErrors(
     return text;
   }
 );
+export const handleContextualSearch = neverThrowBoundary("perform contextual search", _handleContextualSearch);

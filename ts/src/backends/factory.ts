@@ -7,7 +7,8 @@
 
 import { Config, type BackendType } from "../config.js";
 import { DatabaseConnectionError } from "../errors.js";
-import type { GraphBackend } from "./index.js";
+import type { GraphBackend, HealthCheckResult } from "./index.js";
+import type { Memory, Relationship, RelationshipProperties, SearchQuery } from "../models.js";
 
 const VALID_BACKENDS =
   "neo4j, memgraph, falkordb, falkordblite, sqlite, turso, ladybugdb, cloud, auto";
@@ -25,6 +26,16 @@ const BACKEND_NAMES: Record<string, string> = {
 
 export class BackendFactory {
   static async createBackend(): Promise<GraphBackend> {
+    // TEST-ONLY injection hook: when MEMORYGRAPH_TEST_INJECT_THROW=1 is set,
+    // return a backend whose every operation throws a synthetic error
+    // containing a SECRET payload. Used by the never-throw sweep test
+    // (VAL-CROSS-005) to verify no CLI command escapes an unhandled
+    // exception / raw stack / sensitive data to the caller. This hook is
+    // never active in normal operation.
+    if (process.env.MEMORYGRAPH_TEST_INJECT_THROW === "1") {
+      return new ThrowingBackend();
+    }
+
     const backendType = Config.BACKEND.toLowerCase();
 
     if (backendType === "auto") {
@@ -193,5 +204,89 @@ export class BackendFactory {
     };
     const check = checks[backendType];
     return check ? check() : false;
+  }
+}
+
+/**
+ * TEST-ONLY backend whose every operation throws a synthetic error
+ * containing a SECRET payload. Activated by `MEMORYGRAPH_TEST_INJECT_THROW=1`
+ * in `BackendFactory.createBackend()`. Used by the never-throw sweep test
+ * (VAL-CROSS-005) to verify the integration boundary catches backend throws
+ * and surfaces only a generic message (no SECRET, no raw stack).
+ *
+ * Never used in normal operation.
+ */
+class ThrowingBackend implements GraphBackend {
+  private boom(): never {
+    throw new Error(
+      "ThrowingBackend: synthetic backend throw — SECRET=password=hunter2, token=abc123"
+    );
+  }
+
+  async connect(): Promise<boolean> {
+    this.boom();
+  }
+  async disconnect(): Promise<void> {
+    this.boom();
+  }
+  async executeQuery(
+    _query: string,
+    _parameters?: Record<string, unknown>,
+    _write?: boolean
+  ): Promise<Record<string, unknown>[]> {
+    this.boom();
+  }
+  async initializeSchema(): Promise<void> {
+    this.boom();
+  }
+  async healthCheck(): Promise<HealthCheckResult> {
+    this.boom();
+  }
+  backendName(): string {
+    return "throwing";
+  }
+  supportsFulltextSearch(): boolean {
+    return false;
+  }
+  supportsTransactions(): boolean {
+    return false;
+  }
+  isCypherCapable(): boolean {
+    return false;
+  }
+  async storeMemory(_memory: Memory): Promise<string> {
+    this.boom();
+  }
+  async getMemory(_memoryId: string, _includeRelationships?: boolean): Promise<Memory | null> {
+    this.boom();
+  }
+  async searchMemories(_searchQuery: SearchQuery): Promise<Memory[]> {
+    this.boom();
+  }
+  async updateMemory(_memory: Memory): Promise<boolean> {
+    this.boom();
+  }
+  async deleteMemory(_memoryId: string): Promise<boolean> {
+    this.boom();
+  }
+  async createRelationship(
+    _fromMemoryId: string,
+    _toMemoryId: string,
+    _relationshipType: string,
+    _properties?: RelationshipProperties
+  ): Promise<string> {
+    this.boom();
+  }
+  async getRelatedMemories(
+    _memoryId: string,
+    _opts?: { relationshipTypes?: string[]; maxDepth?: number }
+  ): Promise<[Memory, Relationship][]> {
+    this.boom();
+  }
+  async getMemoryStatistics(): Promise<Record<string, unknown>> {
+    this.boom();
+  }
+  async getRecentActivity(_days?: number, _project?: string | null): Promise<Record<string, unknown>> {
+    this.boom();
   }
 }

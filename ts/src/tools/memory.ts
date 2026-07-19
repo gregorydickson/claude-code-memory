@@ -13,9 +13,9 @@ import {
 } from "../models.js";
 import { MemoryContextSchema } from "../models.js";
 import { validateMemoryInput, validateSearchInput } from "../utils/validation.js";
-import { handleToolErrors } from "./error-handling.js";
+import { handleToolErrors, neverThrowBoundary } from "./error-handling.js";
 
-export const handleStoreMemory = handleToolErrors(
+const _handleStoreMemory = handleToolErrors(
   "store memory",
   async (db: IMemoryDatabase, args: Record<string, unknown>): Promise<string> => {
     validateMemoryInput(args);
@@ -47,8 +47,9 @@ export const handleStoreMemory = handleToolErrors(
     return `Memory stored successfully with ID: ${memoryId}`;
   }
 );
+export const handleStoreMemory = neverThrowBoundary("store memory", _handleStoreMemory);
 
-export const handleGetMemory = handleToolErrors(
+const _handleGetMemory = handleToolErrors(
   "get memory",
   async (db: IMemoryDatabase, args: Record<string, unknown>): Promise<string> => {
     const memoryId = args["memory_id"] as string;
@@ -90,8 +91,9 @@ export const handleGetMemory = handleToolErrors(
     return text;
   }
 );
+export const handleGetMemory = neverThrowBoundary("get memory", _handleGetMemory);
 
-export const handleUpdateMemory = handleToolErrors(
+const _handleUpdateMemory = handleToolErrors(
   "update memory",
   async (db: IMemoryDatabase, args: Record<string, unknown>): Promise<string> => {
     validateMemoryInput(args);
@@ -114,8 +116,9 @@ export const handleUpdateMemory = handleToolErrors(
       : `Failed to update memory: ${memoryId}`;
   }
 );
+export const handleUpdateMemory = neverThrowBoundary("update memory", _handleUpdateMemory);
 
-export const handleDeleteMemory = handleToolErrors(
+const _handleDeleteMemory = handleToolErrors(
   "delete memory",
   async (db: IMemoryDatabase, args: Record<string, unknown>): Promise<string> => {
     const memoryId = args["memory_id"] as string;
@@ -125,3 +128,4 @@ export const handleDeleteMemory = handleToolErrors(
       : `Failed to delete memory (may not exist): ${memoryId}`;
   }
 );
+export const handleDeleteMemory = neverThrowBoundary("delete memory", _handleDeleteMemory);

@@ -80,3 +80,18 @@ export class ConfigurationError extends MemoryError {
     this.name = "ConfigurationError";
   }
 }
+
+/**
+ * Raised when a backend query exceeds the configured bounded timeout
+ * (Config.QUERY_TIMEOUT, env MEMORYGRAPH_QUERY_TIMEOUT).
+ *
+ * Used by the bounded-query-timeout wrappers around
+ * BaseFalkorDBBackend.executeQuery and BaseBoltBackend.executeQuery so a
+ * hung query degrades to a typed error instead of hanging the caller.
+ */
+export class TimeoutError extends MemoryError {
+  constructor(message: string, details?: Record<string, unknown>) {
+    super(message, details);
+    this.name = "TimeoutError";
+  }
+}

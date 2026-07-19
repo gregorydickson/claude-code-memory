@@ -8,9 +8,9 @@ import type { IMemoryDatabase } from "../database.js";
 import { createRelationshipProperties, isRelationshipType } from "../models.js";
 import { validateRelationshipInput } from "../utils/validation.js";
 import { extractContextStructure } from "../utils/context-extractor.js";
-import { handleToolErrors } from "./error-handling.js";
+import { handleToolErrors, neverThrowBoundary } from "./error-handling.js";
 
-export const handleCreateRelationship = handleToolErrors(
+const _handleCreateRelationship = handleToolErrors(
   "create relationship",
   async (db: IMemoryDatabase, args: Record<string, unknown>): Promise<string> => {
     validateRelationshipInput(args);
@@ -43,8 +43,9 @@ export const handleCreateRelationship = handleToolErrors(
     return `Relationship created successfully: ${relationshipId}`;
   }
 );
+export const handleCreateRelationship = neverThrowBoundary("create relationship", _handleCreateRelationship);
 
-export const handleGetRelatedMemories = handleToolErrors(
+const _handleGetRelatedMemories = handleToolErrors(
   "get related memories",
   async (db: IMemoryDatabase, args: Record<string, unknown>): Promise<string> => {
     const memoryId = args["memory_id"] as string;
@@ -71,3 +72,4 @@ export const handleGetRelatedMemories = handleToolErrors(
     return text;
   }
 );
+export const handleGetRelatedMemories = neverThrowBoundary("get related memories", _handleGetRelatedMemories);

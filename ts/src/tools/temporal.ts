@@ -8,7 +8,7 @@
 
 import type { IMemoryDatabase } from "../database.js";
 import type { Memory, Relationship } from "../models.js";
-import { handleToolErrors } from "./error-handling.js";
+import { handleToolErrors, neverThrowBoundary } from "./error-handling.js";
 
 export interface QueryAsOfArgs {
   memory_id: string;
@@ -25,9 +25,11 @@ export interface WhatChangedArgs {
   since: string;
 }
 
-export const handleQueryAsOf = handleToolErrors(
+export const handleQueryAsOf = neverThrowBoundary(
   "query as of",
-  async (db: IMemoryDatabase, args: QueryAsOfArgs): Promise<string> => {
+  handleToolErrors(
+    "query as of",
+    async (db: IMemoryDatabase, args: QueryAsOfArgs): Promise<string> => {
     const memoryId = args["memory_id"];
     const asOfStr = args["as_of"];
 
@@ -75,11 +77,14 @@ export const handleQueryAsOf = handleToolErrors(
 
     return text;
   }
+  )
 );
 
-export const handleGetRelationshipHistory = handleToolErrors(
+export const handleGetRelationshipHistory = neverThrowBoundary(
   "get relationship history",
-  async (db: IMemoryDatabase, args: GetRelationshipHistoryArgs): Promise<string> => {
+  handleToolErrors(
+    "get relationship history",
+    async (db: IMemoryDatabase, args: GetRelationshipHistoryArgs): Promise<string> => {
     const memoryId = args["memory_id"];
 
     const memory = await db.getMemory(memoryId);
@@ -139,11 +144,14 @@ export const handleGetRelationshipHistory = handleToolErrors(
 
     return text;
   }
+  )
 );
 
-export const handleWhatChanged = handleToolErrors(
+export const handleWhatChanged = neverThrowBoundary(
   "get what changed",
-  async (db: IMemoryDatabase, args: WhatChangedArgs): Promise<string> => {
+  handleToolErrors(
+    "get what changed",
+    async (db: IMemoryDatabase, args: WhatChangedArgs): Promise<string> => {
     const sinceStr = args["since"];
 
     let since: Date;
@@ -248,6 +256,7 @@ export const handleWhatChanged = handleToolErrors(
 
     return text;
   }
+  )
 );
 
 function toIso(value: string | Date): string {

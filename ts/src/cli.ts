@@ -27,6 +27,7 @@ import {
   handleGetRelationshipHistory,
   handleWhatChanged,
 } from "./tools/temporal.js";
+import { surfaceGenericError } from "./tools/error-handling.js";
 
 import { exportToJson, importFromJson, exportToMarkdown } from "./utils/export-import.js";
 import {
@@ -138,7 +139,9 @@ async function performHealthCheck(timeout = 5.0): Promise<Record<string, unknown
       await backend.disconnect();
     }
   } catch (err) {
-    result["error"] = String(err);
+    // SEC-5: debug-log the full error, surface a generic message (no
+    // sensitive data / raw stack).
+    result["error"] = surfaceGenericError("health check", err);
   }
 
   return result;
@@ -398,7 +401,11 @@ export async function main(): Promise<void> {
     if (err instanceof ExitError) {
       process.exit(err.code);
     }
-    eprint(`Error: ${err instanceof Error ? err.message : String(err)}`);
+    // Never-throw at the CLI integration boundary (SEC-5): debug-log the
+    // full error, surface a generic message. No sensitive data / raw stack
+    // reaches the caller.
+    const generic = surfaceGenericError(`CLI command '${command}'`, err);
+    eprint(generic);
     process.exit(1);
   }
 }
