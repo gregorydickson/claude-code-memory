@@ -24,7 +24,7 @@ explicitly to `FalkorDB.open({ modulePath, redisServerPath })`. This makes
 the `falkordblite` package's own `BinaryManager.ensureBinaries()` skip its
 network-download path entirely — the user-supplied paths short-circuit it.
 
-A belt-and-suspenders `ts/scripts/vendor-postinstall.js` (wired as the
+A belt-and-suspenders `ts/scripts/vendor-postinstall.cjs` (wired as the
 root `postinstall` in `ts/package.json`) also copies the vendored binaries
 into `node_modules/falkordblite/bin/<platform>/` if they are missing, so
 direct `falkordblite` package users (who bypass our backend wiring) get the
