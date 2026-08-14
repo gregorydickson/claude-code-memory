@@ -48,6 +48,7 @@ export abstract class BaseFalkorDBBackend implements GraphBackend {
   client: any = null;
   graph: any = null;
   _connected = false;
+  private _schemaInitialized = false;
 
   constructor(graphName = "memorygraph") {
     this.graphName = graphName;
@@ -179,7 +180,9 @@ export abstract class BaseFalkorDBBackend implements GraphBackend {
   // -----------------------------------------------------------------------
 
   async initializeSchema(): Promise<void> {
-    console.log(`Initializing ${this._display_name} schema...`);
+    if (this._schemaInitialized) {
+      return;
+    }
 
     const indexProps = ["type", "created_at", "importance", "confidence"];
 
@@ -192,6 +195,17 @@ export abstract class BaseFalkorDBBackend implements GraphBackend {
         "version"
       );
     }
+
+    // If the schema (range index on Memory.id plus the required per-property
+    // indexes) already exists, the database was initialized on a previous
+    // run. Skip schema creation entirely so opening an existing, populated
+    // database is a no-op instead of re-issuing DDL on every process start.
+    if (await this.schemaExists(indexProps)) {
+      this._schemaInitialized = true;
+      return;
+    }
+
+    console.log(`Initializing ${this._display_name} schema...`);
 
     // The FalkorDB server does not accept the legacy `CREATE CONSTRAINT ON…`
     // Cypher string and duplicate index creation is not idempotent, so use
@@ -249,6 +263,46 @@ export abstract class BaseFalkorDBBackend implements GraphBackend {
     }
 
     console.log("Schema initialization completed");
+    this._schemaInitialized = true;
+  }
+
+  /**
+   * Whether the Memory schema (per-property range indexes plus the UNIQUE
+   * constraint on `id`) already exists in the graph. Used to skip DDL on
+   * startup when an existing, populated database is opened.
+   */
+  private async schemaExists(indexProps: string[]): Promise<boolean> {
+    try {
+      const [indexResult, constraintResult] = await Promise.all([
+        this.executeQuery("call db.indexes()", {}, true),
+        this.executeQuery("call db.constraints()", {}, true),
+      ]);
+
+      const existingIndexes = new Set<string>();
+      for (const row of indexResult ?? []) {
+        for (const value of Object.values(row)) {
+          if (typeof value === "string") existingIndexes.add(value);
+        }
+      }
+      const existingConstraints = new Set<string>();
+      for (const row of constraintResult ?? []) {
+        for (const value of Object.values(row)) {
+          if (typeof value === "string") existingConstraints.add(value);
+        }
+      }
+
+      const requiredIndexes = ["id", ...indexProps];
+      const hasAllIndexes = requiredIndexes.every((prop) =>
+        existingIndexes.has(prop)
+      );
+      const hasConstraint = existingConstraints.has("id");
+
+      return hasAllIndexes && hasConstraint;
+    } catch {
+      // Introspection is not available (e.g. older client or a server without
+      // these procedures); fall back to attempting creation.
+      return false;
+    }
   }
 
   // -----------------------------------------------------------------------

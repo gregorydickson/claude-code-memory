@@ -195,6 +195,13 @@ export async function generateSessionBriefing(
 
   console.info(`Generating session briefing for project: ${project.name}`);
 
+  // A memory belongs to a project when it carries the project path/name, or
+  // when it is unassigned (context_project_path is null). Unassigned memories
+  // are included so a briefing still reflects data that was captured without
+  // an explicit project association.
+  const projectFilter = (node: string): string =>
+    `(${node}.context_project_path IS NULL OR ${node}.context_project_path = $project_path OR ${node}.context_project_path CONTAINS $project_name)`;
+
   const briefing: SessionBriefing = {
     project_name: project.name,
     project_path: project.path,
@@ -212,7 +219,7 @@ export async function generateSessionBriefing(
   // Total memory count
   const totalCountQuery = `
     MATCH (m:Memory)
-    WHERE m.context_project_path = $project_path OR m.context_project_path CONTAINS $project_name
+    WHERE ${projectFilter("m")}
     RETURN count(m) as total
   `;
 
@@ -233,7 +240,7 @@ export async function generateSessionBriefing(
 
   const recentQuery = `
     MATCH (m:Memory)
-    WHERE (m.context_project_path = $project_path OR m.context_project_path CONTAINS $project_name)
+    WHERE ${projectFilter("m")}
       AND m.created_at >= $cutoff
     RETURN m.id as id, m.type as type, m.title as title,
            m.summary as summary, m.created_at as created_at,
@@ -268,7 +275,7 @@ export async function generateSessionBriefing(
   // Unresolved problems
   const problemsQuery = `
     MATCH (p:Memory {type: 'problem'})
-    WHERE (p.context_project_path = $project_path OR p.context_project_path CONTAINS $project_name)
+    WHERE ${projectFilter("p")}
       AND NOT (p)<-[:SOLVES|ADDRESSES]-(:Memory)
     OPTIONAL MATCH (p)-[r]-()
     RETURN p.id as id, p.title as title, p.content as content,
@@ -305,7 +312,7 @@ export async function generateSessionBriefing(
   // Relevant patterns
   const patternsQuery = `
     MATCH (m:Memory {type: 'code_pattern'})
-    WHERE m.context_project_path = $project_path OR m.context_project_path CONTAINS $project_name
+    WHERE ${projectFilter("m")}
     RETURN m.id as id, m.title as type, m.content as description,
            m.effectiveness as effectiveness, m.usage_count as usage_count,
            m.last_accessed as last_used
@@ -348,7 +355,7 @@ export async function generateSessionBriefing(
   // Deprecation warnings
   const deprecatedQuery = `
     MATCH (old:Memory)-[r:DEPRECATED_BY]->(new:Memory)
-    WHERE old.context_project_path = $project_path OR old.context_project_path CONTAINS $project_name
+    WHERE ${projectFilter("old")}
     RETURN old.id as old_id, old.title as old_title,
            new.id as new_id, new.title as new_title,
            r.context as reason
