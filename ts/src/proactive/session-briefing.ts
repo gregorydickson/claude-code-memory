@@ -234,7 +234,7 @@ export async function generateSessionBriefing(
   const recentQuery = `
     MATCH (m:Memory)
     WHERE (m.context_project_path = $project_path OR m.context_project_path CONTAINS $project_name)
-      AND datetime(m.created_at) >= datetime($cutoff)
+      AND m.created_at >= $cutoff
     RETURN m.id as id, m.type as type, m.title as title,
            m.summary as summary, m.created_at as created_at,
            m.tags as tags
@@ -269,9 +269,7 @@ export async function generateSessionBriefing(
   const problemsQuery = `
     MATCH (p:Memory {type: 'problem'})
     WHERE (p.context_project_path = $project_path OR p.context_project_path CONTAINS $project_name)
-      AND NOT EXISTS {
-        MATCH (p)<-[:SOLVES|ADDRESSES]-(:Memory)
-      }
+      AND NOT (p)<-[:SOLVES|ADDRESSES]-(:Memory)
     OPTIONAL MATCH (p)-[r]-()
     RETURN p.id as id, p.title as title, p.content as content,
            p.created_at as created_at, p.tags as tags,

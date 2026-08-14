@@ -142,11 +142,11 @@ export async function trackWorkflow(
     await backend.executeQuery(
       `
       MERGE (s:Entity {id: $session_id, type: 'session'})
-      ON CREATE SET s.created_at = datetime(), s.start_time = datetime()
-      SET s.last_activity = datetime()
+      ON CREATE SET s.created_at = $now, s.start_time = $now
+      SET s.last_activity = $now
       RETURN s.id as id
       `,
-      { session_id: sessionId },
+      { session_id: sessionId, now: new Date().toISOString() },
       true
     );
 
@@ -497,9 +497,7 @@ export async function getSessionState(
       `
       MATCH (e:Memory {type: 'error'})<-[:EXHIBITS]-(a:Memory {type: 'workflow'})
       WHERE (a)-[:IN_SESSION]->(:Entity {id: $session_id})
-      AND NOT EXISTS {
-        MATCH (e)<-[:SOLVES]-(:Memory)
-      }
+      AND NOT (e)<-[:SOLVES]-(:Memory)
       RETURN DISTINCT e.title as problem
       LIMIT 10
       `,

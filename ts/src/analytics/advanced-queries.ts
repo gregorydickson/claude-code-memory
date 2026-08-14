@@ -507,9 +507,7 @@ export async function identifyKnowledgeGaps(
   // Find problems without solutions
   let unsolvedQuery = `
     MATCH (p:Memory {type: 'problem'})
-    WHERE NOT EXISTS {
-      MATCH (p)<-[:SOLVES|ADDRESSES]-(:Memory)
-    }
+    WHERE NOT (p)<-[:SOLVES|ADDRESSES]-(:Memory)
   `;
   if (project) {
     unsolvedQuery += "AND (p.context CONTAINS $project)\n";

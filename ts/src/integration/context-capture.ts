@@ -154,10 +154,10 @@ export async function captureTaskContext(
       await backend.executeQuery(
         `
         MERGE (f:Entity {name: $file_path, type: 'file'})
-        ON CREATE SET f.id = $file_id, f.created_at = datetime()
+        ON CREATE SET f.id = $file_id, f.created_at = $now
         RETURN f.id as id
         `,
-        { file_path: filePath, file_id: fileId },
+        { file_path: filePath, file_id: fileId, now: new Date().toISOString() },
         true
       );
       await backend.createRelationship(
@@ -310,10 +310,10 @@ export async function analyzeErrorPatterns(
           await backend.executeQuery(
             `
             MATCH (m:Memory {id: $pattern_id})
-            SET m.updated_at = datetime()
+            SET m.updated_at = $now
             RETURN m.id as id
             `,
-            { pattern_id: patternId },
+            { pattern_id: patternId, now: new Date().toISOString() },
             true
           );
         } catch (err) {
@@ -392,20 +392,20 @@ export async function trackSolutionEffectiveness(
       await backend.executeQuery(
         `
         MATCH (m:Memory {id: $pattern_id})
-        SET m.updated_at = datetime()
+        SET m.updated_at = $now
         RETURN m.id as id
         `,
-        { pattern_id: errorPatternId, solution_id: solutionMemoryId },
+        { pattern_id: errorPatternId, solution_id: solutionMemoryId, now: new Date().toISOString() },
         true
       );
     } else {
       await backend.executeQuery(
         `
         MATCH (m:Memory {id: $pattern_id})
-        SET m.updated_at = datetime()
+        SET m.updated_at = $now
         RETURN m.id as id
         `,
-        { pattern_id: errorPatternId, solution_id: solutionMemoryId },
+        { pattern_id: errorPatternId, solution_id: solutionMemoryId, now: new Date().toISOString() },
         true
       );
     }
@@ -421,10 +421,10 @@ export async function trackSolutionEffectiveness(
       MATCH (s)-[r:SOLVES|ATTEMPTED_SOLUTION]->(e:Memory {type: 'error'})
       WITH s, COUNT(r) as total_attempts,
            SUM(CASE WHEN type(r) = 'SOLVES' THEN 1 ELSE 0 END) as successes
-      SET s.updated_at = datetime()
+      SET s.updated_at = $now
       RETURN s.id as id
       `,
-      { solution_id: solutionMemoryId },
+      { solution_id: solutionMemoryId, now: new Date().toISOString() },
       true
     );
   } catch (err) {

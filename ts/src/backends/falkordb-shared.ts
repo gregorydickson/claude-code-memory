@@ -98,10 +98,16 @@ export abstract class BaseFalkorDBBackend implements GraphBackend {
       );
     }
 
-    const params = parameters ?? {};
+    const params = sanitizeParams(parameters ?? {});
 
     try {
-      const result = await this.graph.query(query, params);
+      // FalkorDB JS client expects query options (incl. params) as the
+      // second argument and passes params inline via CYPHER, e.g.
+      // `options: { params: { ... } }`. Passing params positionally
+      // results in "Missing parameters" errors. `null`/`undefined` values
+      // inside object params must be dropped — the inline serializer
+      // otherwise fails with "Encountered unhandled type".
+      const result = await this.graph.query(query, { params });
       return this.convertFalkorDBResult(result);
     } catch (err) {
       console.error(`Query execution failed: ${err}`);
@@ -145,8 +151,25 @@ export abstract class BaseFalkorDBBackend implements GraphBackend {
   }
 
   private convertFalkorDBValue(value: any): any {
-    if (value && typeof value === "object" && "properties" in value) {
-      return { ...value.properties };
+    if (value && typeof value === "object") {
+      // FalkorDB node: { id, labels, properties: { ... } } → flatten properties
+      if ("properties" in value && typeof value.properties === "object") {
+        return { ...value.properties };
+      }
+      // Recurse into plain objects / arrays to flatten nested node values.
+      if (Array.isArray(value)) {
+        return value.map((v) => this.convertFalkorDBValue(v));
+      }
+      if (!(value instanceof Date)) {
+        const out: Record<string, unknown> = {};
+        let changed = false;
+        for (const [k, v] of Object.entries(value)) {
+          const converted = this.convertFalkorDBValue(v);
+          if (converted !== v) changed = true;
+          out[k] = converted;
+        }
+        return changed ? out : value;
+      }
     }
     return value;
   }
@@ -158,40 +181,60 @@ export abstract class BaseFalkorDBBackend implements GraphBackend {
   async initializeSchema(): Promise<void> {
     console.log(`Initializing ${this._display_name} schema...`);
 
-    const constraints = [
-      "CREATE CONSTRAINT ON (m:Memory) ASSERT m.id IS UNIQUE",
-    ];
-
-    const indexes = [
-      "CREATE INDEX ON :Memory(type)",
-      "CREATE INDEX ON :Memory(created_at)",
-      "CREATE INDEX ON :Memory(importance)",
-      "CREATE INDEX ON :Memory(confidence)",
-    ];
+    const indexProps = ["type", "created_at", "importance", "confidence"];
 
     if (Config.isMultiTenantMode()) {
-      indexes.push(
-        "CREATE INDEX ON :Memory(context_tenant_id)",
-        "CREATE INDEX ON :Memory(context_team_id)",
-        "CREATE INDEX ON :Memory(context_visibility)",
-        "CREATE INDEX ON :Memory(context_created_by)",
-        "CREATE INDEX ON :Memory(version)"
+      indexProps.push(
+        "context_tenant_id",
+        "context_team_id",
+        "context_visibility",
+        "context_created_by",
+        "version"
       );
     }
 
-    for (const constraint of constraints) {
-      try {
-        await this.executeQuery(constraint, {}, true);
-      } catch (err) {
-        // Constraint may already exist
+    // The FalkorDB server does not accept the legacy `CREATE CONSTRAINT ON…`
+    // Cypher string and duplicate index creation is not idempotent, so use
+    // the client's native index/constraint helpers and treat "already
+    // exists" errors as success.
+    if (this.graph && typeof this.graph.createNodeRangeIndex === "function") {
+      for (const prop of indexProps) {
+        try {
+          await this.graph.createNodeRangeIndex("Memory", [prop]);
+        } catch (err) {
+          // Index already exists — expected on repeated runs.
+        }
       }
-    }
-
-    for (const index of indexes) {
-      try {
-        await this.executeQuery(index, {}, true);
-      } catch (err) {
-        // Index may already exist
+      // UNIQUE constraint requires a supporting (exact-match) range index on
+      // the `id` property; both must exist before the constraint is created.
+      if (typeof this.graph.constraintCreate === "function") {
+        try {
+          await this.graph.createNodeRangeIndex("Memory", ["id"]);
+          await this.graph.constraintCreate("UNIQUE", "NODE", "Memory", "id");
+        } catch {
+          // Constraint or index already present.
+        }
+      }
+    } else {
+      for (const constraint of [
+        "CREATE CONSTRAINT ON (m:Memory) ASSERT m.id IS UNIQUE",
+      ]) {
+        try {
+          await this.executeQuery(constraint, {}, true);
+        } catch {
+          // Constraint may already exist.
+        }
+      }
+      for (const index of indexProps) {
+        try {
+          await this.executeQuery(
+            `CREATE INDEX ON :Memory(${index})`,
+            {},
+            true
+          );
+        } catch {
+          // Index may already exist.
+        }
       }
     }
 
@@ -295,8 +338,8 @@ export abstract class BaseFalkorDBBackend implements GraphBackend {
         WHERE ${whereClause}
         RETURN m
         ORDER BY m.importance DESC, m.created_at DESC
-        LIMIT $limit
         SKIP $offset
+        LIMIT $limit
       `;
       parameters["limit"] = searchQuery.limit;
       parameters["offset"] = searchQuery.offset ?? 0;
@@ -390,17 +433,22 @@ export abstract class BaseFalkorDBBackend implements GraphBackend {
       propsDict["recorded_at"] = toIso(props.recorded_at);
       if (props.valid_until) propsDict["valid_until"] = toIso(props.valid_until);
 
+      // FalkorDB (embedded lite) fails to inline map params used as
+      // relationship properties ("Encountered unhandled type"). Inline a
+      // safely-escaped literal map instead; only string/number/boolean are
+      // emitted, so no values are lost.
+      const propsLiteral = toCypherMapLiteral(propsDict);
       const query = `
         MATCH (from:Memory {id: $from_id})
         MATCH (to {id: $to_id})
         WHERE to:Memory OR to:Entity
-        CREATE (from)-[r:${relationshipType} $properties]->(to)
+        CREATE (from)-[r:${relationshipType} ${propsLiteral}]->(to)
         RETURN r.id as id
       `;
 
       const result = await this.executeQuery(
         query,
-        { from_id: fromMemoryId, to_id: toMemoryId, properties: propsDict },
+        { from_id: fromMemoryId, to_id: toMemoryId },
         true
       );
 
@@ -437,13 +485,14 @@ export abstract class BaseFalkorDBBackend implements GraphBackend {
 
       const query = `
         MATCH (start:Memory {id: $memory_id})
-        MATCH (start)-[r${relFilter}*1..${maxDepth}]-(related:Memory)
+        MATCH path=(start)-[r${relFilter}*1..${maxDepth}]-(related:Memory)
         WHERE related.id <> start.id
-        WITH DISTINCT related, r[0] as rel
+        WITH DISTINCT related, relationships(path) as rels
+        UNWIND rels as rel
         RETURN related,
                type(rel) as rel_type,
                properties(rel) as rel_props
-        ORDER BY rel.strength DESC, related.importance DESC
+        ORDER BY rel_props.strength DESC, related.importance DESC
         LIMIT 20
       `;
 
@@ -538,4 +587,50 @@ export abstract class BaseFalkorDBBackend implements GraphBackend {
 
 function toIso(value: string | Date): string {
   return value instanceof Date ? value.toISOString() : value;
+}
+
+/**
+ * Serialize a property record into a literal Cypher map, e.g.
+ * `{strength:0.5, context:'text', id:'abc'}`. Keys and string values are
+ * escaped; `null`/`undefined`/`Date`/booleans handled; nested objects and
+ * arrays are not emitted (relationship props are flat scalars).
+ */
+function toCypherMapLiteral(props: Record<string, unknown>): string {
+  const parts: string[] = [];
+  for (const key of Object.keys(props)) {
+    const value = props[key];
+    if (value === null || value === undefined) continue;
+    let literal: string;
+    if (typeof value === "string") {
+      literal = `'${value.replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`;
+    } else if (typeof value === "number" || typeof value === "boolean") {
+      literal = String(value);
+    } else {
+      continue; // nested objects/arrays not supported as inline rel props
+    }
+    parts.push(`${key}: ${literal}`);
+  }
+  return `{${parts.join(", ")}}`;
+}
+
+/**
+ * The FalkorDB JS client inlines parameters into the CYPHER query string and
+ * cannot serialize `null`/`undefined` values inside object (map) parameters
+ * ("Encountered unhandled type in inlined properties"). Recursively drop such
+ * keys from plain objects. Arrays are preserved (they may legitimately contain
+ * nulls, e.g. sparse tag lists).
+ */
+function sanitizeParams(params: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(params)) {
+    if (value === null || value === undefined) continue;
+    if (Array.isArray(value)) {
+      out[key] = value;
+    } else if (typeof value === "object" && !(value instanceof Date)) {
+      out[key] = sanitizeParams(value as Record<string, unknown>);
+    } else {
+      out[key] = value;
+    }
+  }
+  return out;
 }

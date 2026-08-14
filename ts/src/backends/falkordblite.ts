@@ -48,9 +48,7 @@ export class FalkorDBLiteBackend extends BaseFalkorDBBackend {
         );
       }
 
-      // FalkorDBLite opens an embedded redis-server with the FalkorDB module.
-      // Pass a path for persistence between runs.
-      this.client = await FalkorDB.open({ path: this.dbPath });
+      this.client = await FalkorDB.open({ path: this.dbPath, timeout: 5000 });
 
       this.graph = this.client.selectGraph(this.graphName);
       this._connected = true;

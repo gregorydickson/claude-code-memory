@@ -302,12 +302,13 @@ export async function detectProject(
       await backend.executeQuery(
         `
         MATCH (p:Memory {id: $project_id})
-        SET p.updated_at = datetime()
+        SET p.updated_at = $now
         RETURN p.id as id
         `,
         {
           project_id: project.project_id,
           git_remote: gitRemote,
+          now: new Date().toISOString(),
           project_type: projectType,
           technologies: uniqueTechnologies,
         },
@@ -529,10 +530,10 @@ export async function trackFileChanges(
       await backend.executeQuery(
         `
         MERGE (f:Entity {name: $file_path, type: 'file'})
-        ON CREATE SET f.id = $file_id, f.created_at = datetime()
+        ON CREATE SET f.id = $file_id, f.created_at = $now
         RETURN f.id as id
         `,
-        { file_path: filePath, file_id: fileId },
+        { file_path: filePath, file_id: fileId, now: new Date().toISOString() },
         true
       );
       await backend.createRelationship(

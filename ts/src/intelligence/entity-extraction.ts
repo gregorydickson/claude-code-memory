@@ -355,17 +355,17 @@ export async function linkEntities(
       MERGE (e:Entity {text: $text, type: $type})
       ON CREATE SET
         e.id = randomUUID(),
-        e.created_at = datetime(),
+        e.created_at = $now,
         e.occurrence_count = 1
       ON MATCH SET
         e.occurrence_count = e.occurrence_count + 1,
-        e.last_seen = datetime()
+        e.last_seen = $now
       WITH e
       MATCH (m:Memory {id: $memory_id})
       MERGE (m)-[r:MENTIONS]->(e)
       ON CREATE SET
         r.confidence = $confidence,
-        r.created_at = datetime()
+        r.created_at = $now
       RETURN e.id as entity_id
     `;
 
@@ -374,6 +374,7 @@ export async function linkEntities(
       type: entity.entity_type,
       memory_id: memoryId,
       confidence: entity.confidence,
+      now: new Date().toISOString(),
     };
 
     try {

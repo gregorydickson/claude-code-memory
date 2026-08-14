@@ -75,7 +75,7 @@ export async function recordOutcome(
         success: $success,
         description: $description,
         context: $context,
-        timestamp: datetime($timestamp),
+        timestamp: $timestamp,
         impact: $impact
     })
     CREATE (m)-[:RESULTED_IN]->(o)
@@ -168,7 +168,7 @@ async function updateMemoryEffectiveness(
       SET m.effectiveness = $effectiveness,
           m.confidence = $confidence,
           m.usage_count = $usage_count + 1,
-          m.last_accessed = datetime($timestamp)
+          m.last_accessed = $timestamp
       RETURN m.effectiveness as effectiveness
     `;
 
@@ -291,7 +291,7 @@ export async function updatePatternEffectiveness(
       SET p.effectiveness = $effectiveness,
           p.confidence = $confidence,
           p.usage_count = p.usage_count + 1,
-          p.last_accessed = datetime($timestamp)
+          p.last_accessed = $timestamp
       RETURN p.effectiveness as effectiveness
     `;
 

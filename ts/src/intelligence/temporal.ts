@@ -242,16 +242,17 @@ export class TemporalMemory {
       CREATE (new:Memory)
       SET new = $new_props,
           new.id = randomUUID(),
-          new.created_at = datetime(),
-          new.updated_at = datetime(),
+          new.created_at = $now,
+          new.updated_at = $now,
           new.is_current = true,
           current.is_current = false,
           current.superseded_by = new.id
-      CREATE (new)-[:PREVIOUS {superseded_at: datetime()}]->(current)
+      CREATE (new)-[:PREVIOUS {superseded_at: $now}]->(current)
       RETURN new.id as new_id
     `;
 
-    const params = { current_id: currentMemoryId, new_props: newMemory };
+    const now = new Date().toISOString();
+    const params = { current_id: currentMemoryId, new_props: newMemory, now };
 
     try {
       const results = await this.backend.executeQuery(query, params, true);
