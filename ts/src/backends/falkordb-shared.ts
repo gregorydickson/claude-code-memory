@@ -202,7 +202,9 @@ export abstract class BaseFalkorDBBackend implements GraphBackend {
         try {
           await this.graph.createNodeRangeIndex("Memory", [prop]);
         } catch (err) {
-          // Index already exists — expected on repeated runs.
+          if (!isAlreadyExistsError(err)) {
+            console.warn(`Failed to create index on Memory(${prop}): ${err}`);
+          }
         }
       }
       // UNIQUE constraint requires a supporting (exact-match) range index on
@@ -211,8 +213,12 @@ export abstract class BaseFalkorDBBackend implements GraphBackend {
         try {
           await this.graph.createNodeRangeIndex("Memory", ["id"]);
           await this.graph.constraintCreate("UNIQUE", "NODE", "Memory", "id");
-        } catch {
-          // Constraint or index already present.
+        } catch (err) {
+          if (!isAlreadyExistsError(err)) {
+            console.warn(
+              `Failed to create UNIQUE constraint on Memory.id (legacy data may contain duplicate ids): ${err}`
+            );
+          }
         }
       }
     } else {
@@ -221,8 +227,10 @@ export abstract class BaseFalkorDBBackend implements GraphBackend {
       ]) {
         try {
           await this.executeQuery(constraint, {}, true);
-        } catch {
-          // Constraint may already exist.
+        } catch (err) {
+          if (!isAlreadyExistsError(err)) {
+            console.warn(`Failed to create Memory.id constraint: ${err}`);
+          }
         }
       }
       for (const index of indexProps) {
@@ -232,8 +240,10 @@ export abstract class BaseFalkorDBBackend implements GraphBackend {
             {},
             true
           );
-        } catch {
-          // Index may already exist.
+        } catch (err) {
+          if (!isAlreadyExistsError(err)) {
+            console.warn(`Failed to create index on Memory(${index}): ${err}`);
+          }
         }
       }
     }
@@ -590,6 +600,15 @@ function toIso(value: string | Date): string {
 }
 
 /**
+ * Whether a schema-init error means the index/constraint already exists
+ * (expected on repeated runs) rather than a genuine failure.
+ */
+function isAlreadyExistsError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return /already (indexed|exists)/i.test(message);
+}
+
+/**
  * Serialize a property record into a literal Cypher map, e.g.
  * `{strength:0.5, context:'text', id:'abc'}`. Keys and string values are
  * escaped; `null`/`undefined`/`Date`/booleans handled; nested objects and
@@ -614,20 +633,45 @@ function toCypherMapLiteral(props: Record<string, unknown>): string {
 }
 
 /**
- * The FalkorDB JS client inlines parameters into the CYPHER query string and
- * cannot serialize `null`/`undefined` values inside object (map) parameters
- * ("Encountered unhandled type in inlined properties"). Recursively drop such
- * keys from plain objects. Arrays are preserved (they may legitimately contain
- * nulls, e.g. sparse tag lists).
+ * Prepare query parameters for the FalkorDB JS client, which inlines them
+ * into the CYPHER query string.
+ *
+ * - Top-level `null` params are preserved (Kordas `$name IS NULL`/`$name IN`
+ *   patterns rely on them and the client serializes `null` as a scalar).
+ * - Top-level `undefined` params are dropped (the inline serializer rejects
+ *   `undefined`).
+ * - Inside object (map) params, `null`/`undefined` keys are dropped because
+ *   the client cannot serialize them ("Encountered unhandled type").
+ * Arrays are preserved.
  */
 function sanitizeParams(params: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(params)) {
+    if (value === undefined) continue;
+    if (value === null) {
+      out[key] = value;
+    } else if (Array.isArray(value)) {
+      out[key] = value;
+    } else if (typeof value === "object" && !(value instanceof Date)) {
+      out[key] = sanitizeNestedParams(value as Record<string, unknown>);
+    } else {
+      out[key] = value;
+    }
+  }
+  return out;
+}
+
+/** Drop `null`/`undefined` from the leaves of a nested object (map) param. */
+function sanitizeNestedParams(
+  params: Record<string, unknown>
+): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(params)) {
     if (value === null || value === undefined) continue;
     if (Array.isArray(value)) {
       out[key] = value;
     } else if (typeof value === "object" && !(value instanceof Date)) {
-      out[key] = sanitizeParams(value as Record<string, unknown>);
+      out[key] = sanitizeNestedParams(value as Record<string, unknown>);
     } else {
       out[key] = value;
     }

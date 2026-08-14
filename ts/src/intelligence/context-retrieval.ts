@@ -8,6 +8,7 @@
 
 import type { GraphBackend } from "../backends/index.js";
 import { extractEntities } from "./entity-extraction.js";
+import { parseDatetime } from "../utils/datetime.js";
 
 // ---------------------------------------------------------------------------
 // Return types
@@ -59,11 +60,14 @@ const STOP_WORDS = new Set([
   "who", "when", "where", "why", "how",
 ]);
 
-function parseDate(value: unknown): Date | null {
-  if (!value) return null;
-  if (value instanceof Date) return value;
-  const d = new Date(String(value));
-  return isNaN(d.getTime()) ? null : d;
+/**
+ * Parse a stored creation timestamp into a valid Date, or `null` if it is
+ * missing/invalid. Falls back to sharing the project-wide `parseDatetime`.
+ */
+function parseCreationDate(value: unknown): Date | null {
+  if (value === null || value === undefined) return null;
+  const dt = parseDatetime(value as string | Date);
+  return isNaN(dt.getTime()) ? null : dt;
 }
 
 // ---------------------------------------------------------------------------
@@ -95,22 +99,22 @@ export class ContextRetriever {
     const searchQuery = `
       // Find memories matching entities or keywords
       MATCH (m:Memory)
+      OPTIONAL MATCH (m)-[:MENTIONS]->(me:Entity)
+      WITH m,
+        [x IN collect(DISTINCT me.text) WHERE x IS NOT NULL] as mentioned_entities
       WHERE (
-        any(entity IN $entities WHERE
-          exists((m)-[:MENTIONS]->(:Entity {text: entity}))
-        )
+        any(e IN mentioned_entities WHERE e IN $entities)
         OR
         any(keyword IN $keywords WHERE
           toLower(m.content) CONTAINS keyword OR
           toLower(m.title) CONTAINS keyword
         )
       )
-      WITH m
-      WHERE $project IS NULL OR $project IN m.tags
+      AND ($project IS NULL OR $project IN m.tags)
 
       OPTIONAL MATCH (m)-[r]->(related:Memory)
       WHERE type(r) IN ['SOLVES', 'BUILDS_ON', 'REQUIRES', 'RELATED_TO']
-      WITH m,
+      WITH m, mentioned_entities,
         collect(DISTINCT {
           id: related.id,
           title: related.title,
@@ -124,7 +128,8 @@ export class ContextRetriever {
              m.type as memory_type,
              m.tags as tags,
              m.created_at as created_at,
-             related_memories
+             related_memories,
+             mentioned_entities
       LIMIT 100
     `;
 
@@ -142,11 +147,11 @@ export class ContextRetriever {
         .map((record) => {
           const content = ((record["content"] as string) ?? "").toLowerCase();
           const title = ((record["title"] as string) ?? "").toLowerCase();
+          const mentioned = (record["mentioned_entities"] as string[] | undefined) ?? [];
+          const mentionedLow = mentioned.map((t) => t.toLowerCase());
           let entityMatches = 0;
           for (const e of entityTexts) {
-            if (content.includes(e.toLowerCase()) || title.includes(e.toLowerCase())) {
-              entityMatches++;
-            }
+            if (mentionedLow.includes(e.toLowerCase())) entityMatches++;
           }
           let keywordMatches = 0;
           for (const k of keywords) {
@@ -154,11 +159,11 @@ export class ContextRetriever {
               keywordMatches++;
             }
           }
-          const created = parseDate(record["created_at"]);
+          const created = parseCreationDate(record["created_at"]);
           const ageDays = created ? (now - created.getTime()) / (1000 * 60 * 60 * 24) : 30;
           const relevanceScore =
             (entityMatches * 3 + keywordMatches * 2) / (1.0 + ageDays / 30.0);
-          return { record, relevanceScore, entityMatches, keywordMatches };
+          return { record, relevanceScore };
         })
         .sort((a, b) => b.relevanceScore - a.relevanceScore);
 
@@ -167,7 +172,7 @@ export class ContextRetriever {
       let estimatedTokens = 0;
 
       for (const { record, relevanceScore } of ranked) {
-        const memorySummary = this.formatMemory(record);
+        const memorySummary = this.formatMemory(record, relevanceScore ?? 0);
         const memoryTokens = this.estimateTokens(memorySummary);
 
         if (estimatedTokens + memoryTokens > maxTokens) {
@@ -208,39 +213,65 @@ export class ContextRetriever {
    * Get comprehensive overview of a project.
    */
   async getProjectContext(project: string): Promise<ProjectSummary> {
-    const query = `
+    const listQuery = `
       MATCH (m:Memory)
       WHERE $project IN m.tags
-      RETURN collect(m) as all_memories
+      WITH collect({
+        id: m.id,
+        title: m.title,
+        type: m.type,
+        created_at: m.created_at
+      }) as all
+      RETURN all
+    `;
+    const openQuery = `
+      MATCH (m:Memory)
+      WHERE $project IN m.tags
+        AND m.type = 'problem'
+        AND NOT (m)<-[:SOLVES|ADDRESSES]-(:Memory)
+      WITH collect({
+        id: m.id,
+        title: m.title,
+        type: m.type,
+        created_at: m.created_at
+      }) as open
+      RETURN open
     `;
 
     const params = { project };
 
     try {
-      const results = await this.backend.executeQuery(query, params, false);
+      const [listRes, openRes] = await Promise.all([
+        this.backend.executeQuery(listQuery, params, false),
+        this.backend.executeQuery(openQuery, params, false),
+      ]);
 
       const now = Date.now();
       const weekMs = 7 * 24 * 60 * 60 * 1000;
       const allMemories: Array<Record<string, unknown>> = [];
       const decisions: Record<string, unknown>[] = [];
-      const openProblems: Record<string, unknown>[] = [];
       const solutions: Record<string, unknown>[] = [];
       const recent: Record<string, unknown>[] = [];
 
-      if (results.length > 0) {
-        const raw = results[0]["all_memories"];
+      if (listRes.length > 0) {
+        const raw = listRes[0]["all"];
         const list = Array.isArray(raw) ? raw : [];
         for (const m of list) {
           const mem = (m as Record<string, unknown>) ?? {};
           allMemories.push(mem);
           const type = mem["type"];
-          const created = parseDate(mem["created_at"]);
+          const created = parseCreationDate(mem["created_at"]);
           if (created && now - created.getTime() <= weekMs) recent.push(mem);
           if (type === "decision") decisions.push(mem);
           if (type === "solution") solutions.push(mem);
-          if (type === "problem") openProblems.push(mem);
         }
         recent.sort((a, b) => String(b["created_at"] ?? "").localeCompare(String(a["created_at"] ?? "")));
+      }
+
+      let openProblems: Record<string, unknown>[] = [];
+      if (openRes.length > 0) {
+        const raw = openRes[0]["open"];
+        openProblems = Array.isArray(raw) ? raw : [];
         openProblems.sort((a, b) => String(b["created_at"] ?? "").localeCompare(String(a["created_at"] ?? "")));
       }
 
@@ -345,11 +376,11 @@ export class ContextRetriever {
   // Private helpers
   // -----------------------------------------------------------------------
 
-  private formatMemory(record: Record<string, unknown>): string {
+  private formatMemory(record: Record<string, unknown>, relevanceScore = 0): string {
     const title = (record["title"] as string | null | undefined) ?? "Untitled";
     const memoryType = (record["memory_type"] as string | null | undefined) ?? "unknown";
     let content = (record["content"] as string | null | undefined) ?? "";
-    const relevance = Number(record["relevance_score"] ?? 0);
+    const relevance = Number(relevanceScore ?? 0);
 
     if (content.length > 500) {
       content = content.slice(0, 497) + "...";
