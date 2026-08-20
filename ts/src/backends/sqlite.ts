@@ -622,10 +622,23 @@ const LIKE_ESCAPE_CHAR = "\\";
 
 const LIKE = `LIKE ? ESCAPE '${LIKE_ESCAPE_CHAR}'`;
 
+/**
+ * Escape the LIKE wildcards `%` and `_` so a value is compared literally.
+ *
+ * Pair with the {@link LIKE} operator fragment, which supplies the matching
+ * ESCAPE clause.
+ */
 function escapeLikeValue(value: string): string {
   return value.replace(/[\\%_]/g, (char) => `${LIKE_ESCAPE_CHAR}${char}`);
 }
 
+/**
+ * Normalize a caller-supplied list of search terms.
+ *
+ * Trims and lowercases each entry, discards empty ones, de-duplicates, and
+ * caps the result at {@link MAX_SEARCH_TERMS} so the generated SQL stays
+ * within SQLite's expression limits.
+ */
 function normalizeSearchTerms(terms: string[]): string[] {
   const normalized = new Set<string>();
   for (const term of terms) {
@@ -637,6 +650,15 @@ function normalizeSearchTerms(terms: string[]): string[] {
   return [...normalized];
 }
 
+/**
+ * Split a natural-language query into search terms.
+ *
+ * Retains intra-word punctuation so dotted, hyphenated and underscored
+ * identifiers survive as single terms, discards stopwords and single
+ * characters, de-duplicates, and caps the result at {@link MAX_SEARCH_TERMS}.
+ * Returns an empty array when nothing usable remains, leaving the caller to
+ * fall back to matching the raw query string.
+ */
 function tokenizeSearchQuery(query: string): string[] {
   const terms = new Set<string>();
   for (const raw of query.toLowerCase().split(/[^\p{L}\p{N}_.\-/]+/u)) {
