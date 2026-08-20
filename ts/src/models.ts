@@ -286,31 +286,61 @@ export function memoryToNodeProperties(memory: Memory): Record<string, unknown> 
 }
 
 /**
+ * Known optional property keys (as stored in the graph) that may be removed
+ * when cleared, plus every supported `context_*` field name.
+ */
+const SCHEMA_OPTIONAL_PROPERTIES = [
+  "summary",
+  "effectiveness",
+  "last_accessed",
+  "updated_by",
+  "context_summary",
+];
+
+/** Every supported context field name (prefixes with `context_`). */
+const SCHEMA_CONTEXT_PROPERTIES = Object.keys(MemoryContextSchema.shape).map(
+  (key) => `context_${key}`
+);
+
+/**
+ * The set of graph property names that may appear in a `REMOVE` clause.
+ * Restricts derived keys to known schema fields so that runtime context keys
+ * (e.g. from `memory.context`) can never inject arbitrary Cypher text.
+ */
+const CLEARABLE_GRAPH_PROPERTIES = new Set<string>([
+  ...SCHEMA_OPTIONAL_PROPERTIES,
+  ...SCHEMA_CONTEXT_PROPERTIES,
+]);
+
+/**
  * Property keys (as stored in the graph) that must be *removed* before an
  * update, because `memoryToNodeProperties` omits cleared optional fields and
  * `SET m += $properties` would otherwise leave the stale value on the node.
  *
- * Cleared means the field is explicitly null/undefined on the incoming
- * memory (or a context subfield is null). Optional scalar fields
- * (`summary`, `effectiveness`, `last_accessed`) and every `context_*` key
- * whose value is nullish are removed.
+ * Cleared means the field is explicitly null/undefined on the incoming memory
+ * (or a context subfield is null). Optional scalar fields (`summary`,
+ * `effectiveness`, `last_accessed`, `updated_by`, `context_summary`) and every
+ * `context_*` key whose value is nullish are removed. When `memory.context` is
+ * entirely null/undefined, all supported context properties are removed.
+ *
+ * Returned keys are restricted to a schema whitelist and are therefore safe to
+ * interpolate into a Cypher `REMOVE` clause.
  */
 export function clearedMemoryProperties(memory: Memory): string[] {
   const removed: string[] = [];
-  if (memory.summary === null || memory.summary === undefined) removed.push("summary");
-  if (memory.effectiveness === null || memory.effectiveness === undefined)
-    removed.push("effectiveness");
-  if (memory.last_accessed === null || memory.last_accessed === undefined)
-    removed.push("last_accessed");
-  if (memory.updated_by === null || memory.updated_by === undefined)
-    removed.push("updated_by");
-  if (memory.context_summary === null || memory.context_summary === undefined)
-    removed.push("context_summary");
+  for (const prop of SCHEMA_OPTIONAL_PROPERTIES) {
+    const value = memory[prop as keyof Memory];
+    if (value === null || value === undefined) removed.push(prop);
+  }
 
-  for (const key of Object.keys(memory.context ?? {})) {
-    const value = memory.context?.[key as keyof MemoryContext];
-    if (value === null || value === undefined) {
-      removed.push(`context_${key}`);
+  if (!memory.context) {
+    // A null/undefined context means every stored context field is cleared.
+    removed.push(...SCHEMA_CONTEXT_PROPERTIES);
+  } else {
+    for (const key of SCHEMA_CONTEXT_PROPERTIES) {
+      const contextKey = key.slice("context_".length) as keyof MemoryContext;
+      const value = memory.context[contextKey];
+      if (value === null || value === undefined) removed.push(key);
     }
   }
 

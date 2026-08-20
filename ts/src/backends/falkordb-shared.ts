@@ -156,6 +156,9 @@ export abstract class BaseFalkorDBBackend implements GraphBackend {
   }
 
   private convertFalkorDBValue(value: any): any {
+    if (Array.isArray(value)) {
+      return value.map((v) => this.convertFalkorDBValue(v));
+    }
     if (value && typeof value === "object" && !Array.isArray(value)) {
       // FalkorDB node: { id, labels, properties: { ... } } → flatten properties.
       // Only unwrap a genuine node shape (identified by the `labels` marker and
@@ -169,10 +172,6 @@ export abstract class BaseFalkorDBBackend implements GraphBackend {
         !Array.isArray(value["properties"])
       ) {
         return { ...value.properties };
-      }
-      // Recurse into plain objects / arrays to flatten nested node values.
-      if (Array.isArray(value)) {
-        return value.map((v) => this.convertFalkorDBValue(v));
       }
       if (!(value instanceof Date)) {
         const out: Record<string, unknown> = {};
@@ -234,74 +233,119 @@ export abstract class BaseFalkorDBBackend implements GraphBackend {
       );
     }
 
-    // Supporting per-property range indexes.
+    // Supporting per-property range indexes. A genuine (non-duplicate) failure
+    // must fail initialization so the schema is not silently marked present
+    // while an index is actually missing.
     for (const prop of indexProps) {
       try {
         await this.graph.createNodeRangeIndex("Memory", [prop]);
       } catch (err) {
         if (!isAlreadyExistsError(err)) {
-          console.warn(`Failed to create index on Memory(${prop}): ${err}`);
+          throw new DatabaseConnectionError(
+            `Failed to create index on Memory(${prop}): ${err}`
+          );
         }
       }
     }
 
     // UNIQUE constraint requires a supporting (exact-match) range index on
     // the `id` property; both must exist before the constraint is created.
-    if (typeof this.graph.constraintCreate === "function") {
-      // Create the supporting range index and the constraint in separate try
-      // blocks. If the index already exists (e.g. a partial schema was built
-      // on a prior run) the constraint must still be attempted; otherwise a
-      // database that has the index but no constraint would silently accept
-      // duplicate Memory ids.
-      try {
-        await this.graph.createNodeRangeIndex("Memory", ["id"]);
-      } catch (err) {
-        if (!isAlreadyExistsError(err)) {
-          console.warn(`Failed to create range index on Memory(id): ${err}`);
-        }
-      }
-      try {
-        await this.graph.constraintCreate("UNIQUE", "NODE", "Memory", "id");
-      } catch (err) {
-        if (!isAlreadyExistsError(err)) {
-          console.warn(
-            `Failed to create UNIQUE constraint on Memory.id (legacy data may contain duplicate ids): ${err}`
-          );
-        }
+    if (typeof this.graph.constraintCreate !== "function") {
+      // Without the constraint helper the UNIQUE on Memory.id cannot be
+      // guaranteed, so the schema must not be considered initialized.
+      throw new DatabaseConnectionError(
+        `${this._display_name} graph does not support UNIQUE constraint creation`
+      );
+    }
+
+    // Create the supporting range index and the constraint in separate try
+    // blocks. If the index already exists (e.g. a partial schema was built on
+    // a prior run) the constraint must still be attempted; otherwise a
+    // database that has the index but no constraint would silently accept
+    // duplicate Memory ids. Non-duplicate failures propagate.
+    try {
+      await this.graph.createNodeRangeIndex("Memory", ["id"]);
+    } catch (err) {
+      if (!isAlreadyExistsError(err)) {
+        throw new DatabaseConnectionError(
+          `Failed to create range index on Memory(id): ${err}`
+        );
       }
     }
+    try {
+      await this.graph.constraintCreate("UNIQUE", "NODE", "Memory", "id");
+    } catch (err) {
+      if (!isAlreadyExistsError(err)) {
+        throw new DatabaseConnectionError(
+          `Failed to create UNIQUE constraint on Memory.id (legacy data may contain duplicate ids): ${err}`
+        );
+      }
+    }
+
+    // Constraint creation may be asynchronous in some servers; poll until the
+    // operational UNIQUE constraint and the required range indexes are
+    // visible, bounded by a short number of attempts.
+    await this.waitForSchema(indexProps);
 
     console.log("Schema initialization completed");
     this._schemaInitialized = true;
   }
 
-  /**
-   * Whether the Memory schema (per-property range indexes plus the UNIQUE
-   * constraint on `id`) already exists in the graph. Used to skip DDL on
-   * startup when an existing, populated database is opened.
-   */
-  private async schemaExists(indexProps: string[]): Promise<boolean> {
-    try {
-      const [indexResult, constraintResult] = await Promise.all([
-        this.executeQuery("call db.indexes()", {}, true),
-        this.executeQuery("call db.constraints()", {}, true),
-      ]);
+/**
+ * Whether the operational `Memory` schema (per-property range indexes plus
+ * the UNIQUE constraint on `id`) already exists in the graph. Used to skip
+ * DDL on startup when an existing, populated database is opened.
+ *
+ * Introspection is payload-tolerant: a driver may return one row with all
+ * indexes/constraints aggregated, or one row apiece. Each row is checked for
+ * the operational marker (`entitytype: NODE`, `status: OPERATIONAL`) and its
+ * property metadata aggregated, so the exact operational schema is verified
+ * rather than a loose substring of the property names.
+ */
+private async schemaExists(indexProps: string[]): Promise<boolean> {
+  try {
+    const [indexResult, constraintResult] = await Promise.all([
+      this.executeQuery("call db.indexes()", {}, true),
+      this.executeQuery("call db.constraints()", {}, true),
+    ]);
 
-      const existingIndexes = collectSchemaProperties(indexResult);
-      const existingConstraints = collectSchemaProperties(constraintResult);
-
-      const requiredIndexes = ["id", ...indexProps];
-      const hasAllIndexes = requiredIndexes.every((prop) =>
-        existingIndexes.has(prop)
-      );
-      const hasConstraint = existingConstraints.has("id");
-
-      return hasAllIndexes && hasConstraint;
-    } catch {
-      // Introspection is not available (e.g. older client or a server without
-      // these procedures); fall back to attempting creation.
-      return false;
+    const indexedProps = new Set<string>();
+    for (const row of indexResult ?? []) {
+      if (!isOperationalNodeRow(row)) continue;
+      for (const prop of collectIndexedRangeProps(row)) indexedProps.add(prop);
     }
+
+    const hasConstraint = operationalMemoryConstraintPresent(
+      constraintResult ?? []
+    );
+
+    const requiredIndexes = ["id", ...indexProps];
+    return (
+      hasConstraint &&
+      requiredIndexes.every((prop) => indexedProps.has(prop))
+    );
+  } catch {
+    // Introspection is not available (e.g. older client or a server without
+    // these procedures); fall back to attempting creation.
+    return false;
+  }
+}
+
+  /**
+   * Poll introspection until the operational `Memory` schema (required range
+   * indexes plus the UNIQUE constraint on `id`) is visible. Constraint/index
+   * creation can be asynchronous on some servers; this gives it a bounded time
+   * to become OPERATIONAL rather than declaring success immediately.
+   */
+  private async waitForSchema(indexProps: string[]): Promise<void> {
+    const attempts = 10;
+    for (let i = 0; i < attempts; i++) {
+      if (await this.schemaExists(indexProps)) return;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    throw new DatabaseConnectionError(
+      `Schema initialization did not become OPERATIONAL after ${attempts} attempts for ${this._display_name}`
+    );
   }
 
   // -----------------------------------------------------------------------
@@ -436,9 +480,14 @@ export abstract class BaseFalkorDBBackend implements GraphBackend {
       // last_accessed, updated_by, context_summary, and null context
       // subfields) are omitted by memoryToNodeProperties, so `REMOVE` them
       // explicitly to avoid leaving stale values on the node.
+      //
+      // The cleared keys come from a schema whitelist, but filter them again
+      // here to guarantee no non-identifier text is ever interpolated into the
+      // Cypher string (defense in depth against crafted keys).
+      const removable = cleared.filter((k) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(k));
       const removeClause =
-        cleared.length > 0
-          ? `REMOVE ${cleared.map((k) => `m.${k}`).join(", ")}`
+        removable.length > 0
+          ? `REMOVE ${removable.map((k) => `m.${k}`).join(", ")}`
           : "";
 
       const query = `
@@ -690,52 +739,70 @@ function isAlreadyExistsError(err: unknown): boolean {
 }
 
 /**
- * Collect the indexed/constrained property names from the result of
- * `call db.indexes()` / `call db.constraints()`.
- *
- * FalkorDB returns these as a single row of flat scalar integer-keyed
- * entries (e.g. `{ "0": "id" }`), or in some drivers as a richer map with a
- * `properties` column holding the list of property names plus `label` /
- * `entitytype` / `type` metadata. Only actual property-name-bearing sources
- * are read:
- *  - the `properties` column value (a list of names), and
- *  - integer-keyed scalar rows (positional columns, `"0"`, `"1"`, ...).
- *
- * Other columns (label, type, status, provider, ...) and any map keys are
- * deliberately ignored so a metadata value such as `status: "confidence"`
- * can never satisfy a required-property check and make `schemaExists()`
- * skip index creation.
+ * Whether a schema row from `call db.indexes()` / `call db.constraints()`
+ * describes an operational node (Memory) index or constraint.
  */
-function collectSchemaProperties(rows: Record<string, unknown>[] | null): Set<string> {
-  const props = new Set<string>();
+function isOperationalNodeRow(row: Record<string, unknown>): boolean {
+  const entityType = row["entitytype"] ?? row["entityType"];
+  return (
+    row["label"] === "Memory" &&
+    String(entityType ?? "").toUpperCase() === "NODE" &&
+    String(row["status"] ?? "").toUpperCase() === "OPERATIONAL"
+  );
+}
 
-  const collectList = (value: unknown): void => {
-    // Collect string leaves from a value that is either a scalar string or a
-    // flat list/array of strings (e.g. the `properties` column). Nested maps
-    // are never descended, because their keys/values are metadata, not
-    // property names.
-    if (typeof value === "string") {
-      props.add(value);
-    } else if (Array.isArray(value)) {
-      for (const v of value) collectList(v);
-    }
-  };
+/**
+ * Collect the RANGE-indexed property names from a schema index row.
+ *
+ * A FalkorDB index row carries the indexed properties in `properties` (a list)
+ * and their index types in `types` (a map of property → list of index kinds).
+ * Only properties that have a `RANGE` entry are treated as covered by a range
+ * index, so a full-text or vector index cannot satisfy a required range-index
+ * property. Drivers that omit `types` (older servers) fall back to the
+ * `properties` list.
+ */
+function collectIndexedRangeProps(row: Record<string, unknown>): string[] {
+  const rawProps = row["properties"];
+  const rawTypes = row["types"];
 
-  for (const row of rows ?? []) {
-    for (const [key, value] of Object.entries(row)) {
-      // Only treat integer-keyed scalar rows and the explicit `properties`
-      // column as carrying property names. Everything else (label, type,
-      // status, provider, options, ...) is schema metadata and is ignored, so
-      // a metadata value such as `status: "confidence"` can never satisfy a
-      // required-property check and cause schemaExists to skip the schema.
-      const isIntegerKey = /^\d+$/.test(key);
-      if (isIntegerKey || key === "properties") {
-        collectList(value);
+  const props: string[] = [];
+
+  if (rawTypes && typeof rawTypes === "object" && !Array.isArray(rawTypes)) {
+    for (const [key, kinds] of Object.entries(rawTypes as Record<string, unknown>)) {
+      const list = Array.isArray(kinds) ? kinds : [kinds];
+      if (list.some((k) => String(k).toUpperCase() === "RANGE" || String(k).toUpperCase() === "RANGE_VALUE")) {
+        props.push(key);
       }
+    }
+    return props;
+  }
+
+  // Fallback: no `types` metadata – assume the properties list is range-indexed.
+  if (Array.isArray(rawProps)) {
+    for (const p of rawProps) {
+      if (typeof p === "string") props.push(p);
     }
   }
 
   return props;
+}
+
+/**
+ * Whether any row in the `call db.constraints()` result is the operational
+ * `UNIQUE` constraint on `Memory.id`.
+ */
+function operationalMemoryConstraintPresent(
+  rows: Record<string, unknown>[]
+): boolean {
+  for (const row of rows ?? []) {
+    if (!isOperationalNodeRow(row)) continue;
+    if (String(row["type"] ?? "").toUpperCase() !== "UNIQUE") continue;
+    const rawProps = row["properties"];
+    if (Array.isArray(rawProps) && rawProps.includes("id")) return true;
+    // Driver may expose the property positionally (e.g. integer-keyed rows).
+    if (Object.values(row).some((v) => v === "id")) return true;
+  }
+  return false;
 }
 
 /**
