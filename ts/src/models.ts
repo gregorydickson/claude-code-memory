@@ -326,11 +326,18 @@ const CLEARABLE_GRAPH_PROPERTIES = new Set<string>([
  * Returned keys are restricted to a schema whitelist and are therefore safe to
  * interpolate into a Cypher `REMOVE` clause.
  */
+/** Stored properties cleared by an empty string, matching `memoryToNodeProperties`. */
+const EMPTY_STRING_CLEARS = new Set<string>(["summary", "last_accessed"]);
+
 export function clearedMemoryProperties(memory: Memory): string[] {
   const removed: string[] = [];
   for (const prop of SCHEMA_OPTIONAL_PROPERTIES) {
     const value = memory[prop as keyof Memory];
-    if (value === null || value === undefined) removed.push(prop);
+    if (value === null || value === undefined) {
+      removed.push(prop);
+    } else if (EMPTY_STRING_CLEARS.has(prop) && value === "") {
+      removed.push(prop);
+    }
   }
 
   if (!memory.context) {
@@ -351,7 +358,7 @@ export function clearedMemoryProperties(memory: Memory): string[] {
 // Helpers
 // ---------------------------------------------------------------------------
 
-function toIso(value: string | Date): string {
+export function toIso(value: string | Date): string {
   // Normalize every timestamp to a canonical ISO-8601 form (UTC, 3-digit
   // milliseconds). `value` is validated by the Zod `datetime()`/`date()`
   // schemas, so preserving a supplied string verbatim could otherwise store

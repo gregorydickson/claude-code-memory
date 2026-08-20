@@ -18,6 +18,7 @@ import {
   type SearchQuery,
   memoryToNodeProperties,
   createRelationshipProperties,
+  toIso,
 } from "../models.js";
 import {
   type GraphBackend,
@@ -38,10 +39,6 @@ function validateRelType(relType: string): void {
       `Invalid relationship type: '${relType}'. Only alphanumeric and underscore allowed.`
     );
   }
-}
-
-function toIso(value: string | Date): string {
-  return value instanceof Date ? value.toISOString() : value;
 }
 
 /** Convert neo4j-driver Integer objects to plain JS numbers. */

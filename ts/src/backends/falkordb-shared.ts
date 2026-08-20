@@ -17,6 +17,7 @@ import {
   memoryToNodeProperties,
   createRelationshipProperties,
   clearedMemoryProperties,
+  toIso,
   ALL_RELATIONSHIP_TYPES,
 } from "../models.js";
 import {
@@ -212,7 +213,7 @@ export abstract class BaseFalkorDBBackend implements GraphBackend {
     // indexes) already exists, the database was initialized on a previous
     // run. Skip schema creation entirely so opening an existing, populated
     // database is a no-op instead of re-issuing DDL on every process start.
-    if (await this.schemaExists(indexProps)) {
+    if ((await this.schemaExists(indexProps)) === true) {
       this._schemaInitialized = true;
       return;
     }
@@ -296,13 +297,19 @@ export abstract class BaseFalkorDBBackend implements GraphBackend {
  * the UNIQUE constraint on `id`) already exists in the graph. Used to skip
  * DDL on startup when an existing, populated database is opened.
  *
+ * Returns:
+ *  - `true`  when the required schema is verified operational,
+ *  - `false` when the schema is verifiable but not yet complete,
+ *  - `null`  when introspection itself is not available (the driver or server
+ *            does not implement `call db.indexes()` / `call db.constraints()`).
+ *
  * Introspection is payload-tolerant: a driver may return one row with all
  * indexes/constraints aggregated, or one row apiece. Each row is checked for
  * the operational marker (`entitytype: NODE`, `status: OPERATIONAL`) and its
  * property metadata aggregated, so the exact operational schema is verified
  * rather than a loose substring of the property names.
  */
-private async schemaExists(indexProps: string[]): Promise<boolean> {
+private async schemaExists(indexProps: string[]): Promise<boolean | null> {
   try {
     const [indexResult, constraintResult] = await Promise.all([
       this.executeQuery("call db.indexes()", {}, true),
@@ -326,8 +333,8 @@ private async schemaExists(indexProps: string[]): Promise<boolean> {
     );
   } catch {
     // Introspection is not available (e.g. older client or a server without
-    // these procedures); fall back to attempting creation.
-    return false;
+    // these procedures); the caller cannot verify the schema.
+    return null;
   }
 }
 
@@ -336,11 +343,16 @@ private async schemaExists(indexProps: string[]): Promise<boolean> {
    * indexes plus the UNIQUE constraint on `id`) is visible. Constraint/index
    * creation can be asynchronous on some servers; this gives it a bounded time
    * to become OPERATIONAL rather than declaring success immediately.
+   *
+   * When introspection is unsupported the DDL has already succeeded, so the
+   * wait is skipped rather than failing initialization on a healthy database.
    */
   private async waitForSchema(indexProps: string[]): Promise<void> {
     const attempts = 10;
     for (let i = 0; i < attempts; i++) {
-      if (await this.schemaExists(indexProps)) return;
+      const state = await this.schemaExists(indexProps);
+      // Introspection unsupported (null) or schema verified (true): accept it.
+      if (state === null || state === true) return;
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
     throw new DatabaseConnectionError(
@@ -725,10 +737,6 @@ private async schemaExists(indexProps: string[]): Promise<boolean> {
   }
 }
 
-function toIso(value: string | Date): string {
-  return value instanceof Date ? value.toISOString() : value;
-}
-
 /**
  * Whether a schema-init error means the index/constraint already exists
  * (expected on repeated runs) rather than a genuine failure.
@@ -808,14 +816,22 @@ function operationalMemoryConstraintPresent(
 /**
  * Serialize a property record into a literal Cypher map, e.g.
  * `{strength:0.5, context:'text', id:'abc'}`. Keys and string values are
- * escaped; `null`/`undefined`/`Date`/booleans handled; nested objects and
- * arrays are not emitted (relationship props are flat scalars).
+ * escaped; `null`/`undefined`/`Date`/booleans handled. Nested objects and
+ * arrays are not emitted (relationship props are flat scalars), so those
+ * (and non-identifier keys and non-finite numbers) are skipped. Every skipped
+ * key is reported via `console.warn` so a caller can detect that a property
+ * did not persist, rather than losing it silently.
  */
 function toCypherMapLiteral(props: Record<string, unknown>): string {
   const parts: string[] = [];
   for (const key of Object.keys(props)) {
-    // Keys are emitted verbatim, so only accept valid Cypher identifiers.
-    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) continue;
+    // Keys are emitted verbatim, so skip keys that are not valid Cypher
+    // identifiers. Dropped keys are surfaced so a caller can detect that a
+    // relationship property did not persist.
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
+      console.warn(`toCypherMapLiteral: skipped non-identifier relationship property '${key}'`);
+      continue;
+    }
     const value = props[key];
     if (value === null || value === undefined) continue;
     let literal: string;
@@ -827,13 +843,20 @@ function toCypherMapLiteral(props: Record<string, unknown>): string {
         .replace(/\r/g, "\\r")
         .replace(/\t/g, "\\t")}'`;
     } else if (typeof value === "number") {
-      // `NaN` / `Infinity` are not valid Cypher number literals; skip them.
-      if (!Number.isFinite(value)) continue;
+      // `NaN` / `Infinity` are not valid Cypher number literals; skip them
+      // and report the drop so a caller can detect the property did not persist.
+      if (!Number.isFinite(value)) {
+        console.warn(`toCypherMapLiteral: skipped non-finite relationship property '${key}'`);
+        continue;
+      }
       literal = String(value);
     } else if (typeof value === "boolean") {
       literal = String(value);
     } else {
-      continue; // nested objects/arrays not supported as inline rel props
+      // Nested objects/arrays are not supported as inline rel props; report
+      // the drop so the caller knows the property was not persisted.
+      console.warn(`toCypherMapLiteral: skipped unsupported relationship property '${key}' of type ${typeof value}`);
+      continue;
     }
     parts.push(`${key}: ${literal}`);
   }
@@ -859,7 +882,7 @@ function sanitizeParams(params: Record<string, unknown>): Record<string, unknown
     if (value === null) {
       out[key] = value;
     } else if (Array.isArray(value)) {
-      out[key] = value;
+      out[key] = value.map((v) => sanitizeValue(v));
     } else if (typeof value === "object" && !(value instanceof Date)) {
       out[key] = sanitizeNestedParams(value as Record<string, unknown>);
     } else {
@@ -869,6 +892,21 @@ function sanitizeParams(params: Record<string, unknown>): Record<string, unknown
   return out;
 }
 
+/**
+ * Sanitize a single value for the inline serializer, recursing into arrays and
+ * nested objects so an object (or array) element can never smuggle a `null` /
+ * `undefined` member that the inline serializer rejects.
+ */
+function sanitizeValue(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map((v) => sanitizeValue(v));
+  }
+  if (value && typeof value === "object" && !(value instanceof Date)) {
+    return sanitizeNestedParams(value as Record<string, unknown>);
+  }
+  return value;
+}
+
 /** Drop `null`/`undefined` from the leaves of a nested object (map) param. */
 function sanitizeNestedParams(
   params: Record<string, unknown>
@@ -876,13 +914,7 @@ function sanitizeNestedParams(
   const out: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(params)) {
     if (value === null || value === undefined) continue;
-    if (Array.isArray(value)) {
-      out[key] = value;
-    } else if (typeof value === "object" && !(value instanceof Date)) {
-      out[key] = sanitizeNestedParams(value as Record<string, unknown>);
-    } else {
-      out[key] = value;
-    }
+    out[key] = sanitizeValue(value);
   }
   return out;
 }
