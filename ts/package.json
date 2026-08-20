@@ -27,6 +27,15 @@
     "bun": ">=1.1.0"
   },
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/memory-graph/memory-graph.git",
+    "directory": "ts"
+  },
+  "homepage": "https://memory-graph.github.io/memory-graph/",
+  "bugs": {
+    "url": "https://github.com/memory-graph/memory-graph/issues"
+  },
   "keywords": [
     "memory",
     "knowledge-graph",
