@@ -103,7 +103,7 @@ export class ContextRetriever {
       WITH m,
         [x IN collect(DISTINCT me.text) WHERE x IS NOT NULL] as mentioned_entities
       WHERE (
-        any(e IN mentioned_entities WHERE e IN $entities)
+        any(e IN mentioned_entities WHERE toLower(e) IN $lower_entities)
         OR
         any(keyword IN $keywords WHERE
           toLower(m.content) CONTAINS keyword OR
@@ -121,6 +121,7 @@ export class ContextRetriever {
           rel_type: type(r),
           rel_strength: coalesce(r.strength, 0.5)
         }) as related_memories
+      WHERE all(rel IN related_memories WHERE rel IS NOT NULL AND rel.id IS NOT NULL)
 
       RETURN m.id as id,
              m.title as title,
@@ -130,11 +131,14 @@ export class ContextRetriever {
              m.created_at as created_at,
              related_memories,
              mentioned_entities
+      // Rank deterministically before capping so the LIMIT never drops an
+      // arbitrary slice of the matching set before the TS ranking runs.
+      ORDER BY m.created_at DESC
       LIMIT 100
     `;
 
     const params: Record<string, unknown> = {
-      entities: entityTexts,
+      lower_entities: entityTexts.map((e) => e.toLowerCase()),
       keywords,
       project,
     };
@@ -149,9 +153,10 @@ export class ContextRetriever {
           const title = ((record["title"] as string) ?? "").toLowerCase();
           const mentioned = (record["mentioned_entities"] as string[] | undefined) ?? [];
           const mentionedLow = mentioned.map((t) => t.toLowerCase());
+          const lowerEntities = entityTexts.map((e) => e.toLowerCase());
           let entityMatches = 0;
-          for (const e of entityTexts) {
-            if (mentionedLow.includes(e.toLowerCase())) entityMatches++;
+          for (const e of lowerEntities) {
+            if (mentionedLow.includes(e)) entityMatches++;
           }
           let keywordMatches = 0;
           for (const k of keywords) {
@@ -213,67 +218,83 @@ export class ContextRetriever {
    * Get comprehensive overview of a project.
    */
   async getProjectContext(project: string): Promise<ProjectSummary> {
-    const listQuery = `
+    const params = { project };
+
+    // Each query pushes its cap into the database (ORDER BY + LIMIT) instead
+    // of dragging every project memory back into one unbounded collect() row.
+    // total_memories comes from a dedicated count(m) query.
+    const countQuery = `
       MATCH (m:Memory)
       WHERE $project IN m.tags
-      WITH collect({
-        id: m.id,
-        title: m.title,
-        type: m.type,
-        created_at: m.created_at
-      }) as all
-      RETURN all
+      RETURN count(m) as total
     `;
     const openQuery = `
       MATCH (m:Memory)
       WHERE $project IN m.tags
         AND m.type = 'problem'
         AND NOT (m)<-[:SOLVES|ADDRESSES]-(:Memory)
-      WITH collect({
-        id: m.id,
-        title: m.title,
-        type: m.type,
-        created_at: m.created_at
-      }) as open
-      RETURN open
+      RETURN m.id as id, m.title as title, m.type as type, m.created_at as created_at
+      ORDER BY m.created_at DESC
+      LIMIT 5
+    `;
+    const recentQuery = `
+      MATCH (m:Memory)
+      WHERE $project IN m.tags
+      RETURN m.id as id, m.title as title, m.type as type, m.created_at as created_at
+      ORDER BY m.created_at DESC
+      LIMIT 10
+    `;
+    const decisionsQuery = `
+      MATCH (m:Memory)
+      WHERE $project IN m.tags AND m.type = 'decision'
+      RETURN m.id as id, m.title as title, m.type as type, m.created_at as created_at
+      ORDER BY m.created_at DESC
+      LIMIT 5
+    `;
+    const solutionsQuery = `
+      MATCH (m:Memory)
+      WHERE $project IN m.tags AND m.type = 'solution'
+      RETURN m.id as id, m.title as title, m.type as type, m.created_at as created_at
+      ORDER BY m.created_at DESC
+      LIMIT 5
     `;
 
-    const params = { project };
-
     try {
-      const [listRes, openRes] = await Promise.all([
-        this.backend.executeQuery(listQuery, params, false),
-        this.backend.executeQuery(openQuery, params, false),
-      ]);
+      const [countRes, openRes, recentRes, decisionsRes, solutionsRes] =
+        await Promise.all([
+          this.backend.executeQuery(countQuery, params, false),
+          this.backend.executeQuery(openQuery, params, false),
+          this.backend.executeQuery(recentQuery, params, false),
+          this.backend.executeQuery(decisionsQuery, params, false),
+          this.backend.executeQuery(solutionsQuery, params, false),
+        ]);
 
+      const totalMemories =
+        countRes.length > 0 ? Number(countRes[0]["total"] ?? 0) : 0;
+
+      // Cap to the recent window (7 days) in JS, matching the prior behaviour
+      // while remaining length-bounded by the query LIMIT above.
       const now = Date.now();
       const weekMs = 7 * 24 * 60 * 60 * 1000;
-      const allMemories: Array<Record<string, unknown>> = [];
-      const decisions: Record<string, unknown>[] = [];
-      const solutions: Record<string, unknown>[] = [];
-      const recent: Record<string, unknown>[] = [];
+      const recent = (recentRes ?? []).filter((m) => {
+        const created = parseCreationDate(m["created_at"]);
+        return created !== null && now - created.getTime() <= weekMs;
+      });
 
-      if (listRes.length > 0) {
-        const raw = listRes[0]["all"];
-        const list = Array.isArray(raw) ? raw : [];
-        for (const m of list) {
-          const mem = (m as Record<string, unknown>) ?? {};
-          allMemories.push(mem);
-          const type = mem["type"];
-          const created = parseCreationDate(mem["created_at"]);
-          if (created && now - created.getTime() <= weekMs) recent.push(mem);
-          if (type === "decision") decisions.push(mem);
-          if (type === "solution") solutions.push(mem);
-        }
-        recent.sort((a, b) => String(b["created_at"] ?? "").localeCompare(String(a["created_at"] ?? "")));
-      }
+      const sortByCreatedDesc = (a: Record<string, unknown>, b: Record<string, unknown>) => {
+        const ta = parseCreationDate(a["created_at"]);
+        const tb = parseCreationDate(b["created_at"]);
+        const va = ta ? ta.getTime() : 0;
+        const vb = tb ? tb.getTime() : 0;
+        return vb - va;
+      };
 
-      let openProblems: Record<string, unknown>[] = [];
-      if (openRes.length > 0) {
-        const raw = openRes[0]["open"];
-        openProblems = Array.isArray(raw) ? raw : [];
-        openProblems.sort((a, b) => String(b["created_at"] ?? "").localeCompare(String(a["created_at"] ?? "")));
-      }
+      const openProblems = (openRes ?? [])
+        .slice()
+        .sort(sortByCreatedDesc)
+        .slice(0, 5);
+      const decisions = (decisionsRes ?? []).slice().sort(sortByCreatedDesc).slice(0, 5);
+      const solutions = (solutionsRes ?? []).slice().sort(sortByCreatedDesc).slice(0, 5);
 
       const toSummary = (m: Record<string, unknown>) => ({
         id: m["id"],
@@ -283,19 +304,19 @@ export class ContextRetriever {
       });
 
       return {
-        total_memories: allMemories.length,
-        recent_activity: recent.slice(0, 10).map(toSummary),
-        decisions: decisions.slice(0, 5).map((d) => ({
+        total_memories: totalMemories,
+        recent_activity: recent.map(toSummary),
+        decisions: decisions.map((d) => ({
           id: d["id"],
           title: d["title"],
           created_at: d["created_at"],
         })),
-        open_problems: openProblems.slice(0, 5).map((d) => ({
+        open_problems: openProblems.map((d) => ({
           id: d["id"],
           title: d["title"],
           created_at: d["created_at"],
         })),
-        solutions: solutions.slice(0, 5).map((d) => ({
+        solutions: solutions.map((d) => ({
           id: d["id"],
           title: d["title"],
           created_at: d["created_at"],

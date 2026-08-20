@@ -224,8 +224,19 @@ export abstract class BaseFalkorDBBackend implements GraphBackend {
       // UNIQUE constraint requires a supporting (exact-match) range index on
       // the `id` property; both must exist before the constraint is created.
       if (typeof this.graph.constraintCreate === "function") {
+        // Create the supporting range index and the constraint in separate
+        // try blocks. If the index already exists (e.g. a partial schema was
+        // built on a prior run) the constraint must still be attempted;
+        // otherwise a database that has the index but no constraint would
+        // silently accept duplicate Memory ids.
         try {
           await this.graph.createNodeRangeIndex("Memory", ["id"]);
+        } catch (err) {
+          if (!isAlreadyExistsError(err)) {
+            console.warn(`Failed to create range index on Memory(id): ${err}`);
+          }
+        }
+        try {
           await this.graph.constraintCreate("UNIQUE", "NODE", "Memory", "id");
         } catch (err) {
           if (!isAlreadyExistsError(err)) {
@@ -551,11 +562,13 @@ export abstract class BaseFalkorDBBackend implements GraphBackend {
         MATCH (start:Memory {id: $memory_id})
         MATCH path=(start)-[r${relFilter}*1..${maxDepth}]-(related:Memory)
         WHERE related.id <> start.id
-        WITH DISTINCT related, relationships(path) as rels
-        UNWIND rels as rel
+        WITH DISTINCT related, relationships(path) as rels,
+             head(relationships(path)) as first_rel
         RETURN related,
-               type(rel) as rel_type,
-               properties(rel) as rel_props
+               type(first_rel) as rel_type,
+               properties(first_rel) as rel_props,
+               startNode(first_rel).id as rel_from_id,
+               endNode(first_rel).id as rel_to_id
         ORDER BY rel_props.strength DESC, related.importance DESC
         LIMIT 20
       `;
@@ -572,11 +585,17 @@ export abstract class BaseFalkorDBBackend implements GraphBackend {
 
         const relTypeStr = (record["rel_type"] as string) ?? "RELATED_TO";
         const relProps = (record["rel_props"] as Record<string, unknown>) ?? {};
+        // For a multi-hop path only the first edge (from memoryId) is
+        // reported. The edge's real source/target ids (which may not be
+        // `memoryId`/`mem.id` when the path spans intermediate memories) are
+        // preserved so relationship data stays truthful for every hop.
+        const relFrom = (record["rel_from_id"] as string | null | undefined) ?? memoryId;
+        const relTo = (record["rel_to_id"] as string | null | undefined) ?? mem.id!;
 
         const relationship: Relationship = {
           id: (relProps["id"] as string) ?? null,
-          from_memory_id: memoryId,
-          to_memory_id: mem.id!,
+          from_memory_id: relFrom,
+          to_memory_id: relTo,
           type: relTypeStr,
           properties: createRelationshipProperties({
             strength: (relProps["strength"] as number) ?? 0.5,

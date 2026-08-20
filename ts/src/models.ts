@@ -290,7 +290,15 @@ export function memoryToNodeProperties(memory: Memory): Record<string, unknown> 
 // ---------------------------------------------------------------------------
 
 function toIso(value: string | Date): string {
-  return value instanceof Date ? value.toISOString() : value;
+  // Normalize every timestamp to a canonical ISO-8601 form (UTC, 3-digit
+  // milliseconds). `value` is validated by the Zod `datetime()`/`date()`
+  // schemas, so preserving a supplied string verbatim could otherwise store
+  // variable fractional precision (e.g. ".0000Z" vs ".000Z") that compares
+  // incorrectly when later used in a lexical timestamp comparison.
+  if (value instanceof Date) return value.toISOString();
+  const parsed = new Date(value);
+  if (!isNaN(parsed.getTime())) return parsed.toISOString();
+  return value;
 }
 
 export function parseDate(value: string | Date): Date {
