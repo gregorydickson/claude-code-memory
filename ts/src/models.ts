@@ -285,6 +285,38 @@ export function memoryToNodeProperties(memory: Memory): Record<string, unknown> 
   return props;
 }
 
+/**
+ * Property keys (as stored in the graph) that must be *removed* before an
+ * update, because `memoryToNodeProperties` omits cleared optional fields and
+ * `SET m += $properties` would otherwise leave the stale value on the node.
+ *
+ * Cleared means the field is explicitly null/undefined on the incoming
+ * memory (or a context subfield is null). Optional scalar fields
+ * (`summary`, `effectiveness`, `last_accessed`) and every `context_*` key
+ * whose value is nullish are removed.
+ */
+export function clearedMemoryProperties(memory: Memory): string[] {
+  const removed: string[] = [];
+  if (memory.summary === null || memory.summary === undefined) removed.push("summary");
+  if (memory.effectiveness === null || memory.effectiveness === undefined)
+    removed.push("effectiveness");
+  if (memory.last_accessed === null || memory.last_accessed === undefined)
+    removed.push("last_accessed");
+  if (memory.updated_by === null || memory.updated_by === undefined)
+    removed.push("updated_by");
+  if (memory.context_summary === null || memory.context_summary === undefined)
+    removed.push("context_summary");
+
+  for (const key of Object.keys(memory.context ?? {})) {
+    const value = memory.context?.[key as keyof MemoryContext];
+    if (value === null || value === undefined) {
+      removed.push(`context_${key}`);
+    }
+  }
+
+  return removed;
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------

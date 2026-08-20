@@ -16,6 +16,7 @@ import {
   type SearchQuery,
   memoryToNodeProperties,
   createRelationshipProperties,
+  clearedMemoryProperties,
   ALL_RELATIONSHIP_TYPES,
 } from "../models.js";
 import {
@@ -155,9 +156,18 @@ export abstract class BaseFalkorDBBackend implements GraphBackend {
   }
 
   private convertFalkorDBValue(value: any): any {
-    if (value && typeof value === "object") {
-      // FalkorDB node: { id, labels, properties: { ... } } → flatten properties
-      if ("properties" in value && typeof value.properties === "object") {
+    if (value && typeof value === "object" && !Array.isArray(value)) {
+      // FalkorDB node: { id, labels, properties: { ... } } → flatten properties.
+      // Only unwrap a genuine node shape (identified by the `labels` marker and
+      // a non-null, non-array `properties` map) so a result row that merely has
+      // a column named `properties` does not collapse the whole row into it.
+      if (
+        Array.isArray(value["labels"]) &&
+        "properties" in value &&
+        value["properties"] !== null &&
+        typeof value["properties"] === "object" &&
+        !Array.isArray(value["properties"])
+      ) {
         return { ...value.properties };
       }
       // Recurse into plain objects / arrays to flatten nested node values.
@@ -419,10 +429,22 @@ export abstract class BaseFalkorDBBackend implements GraphBackend {
       memory.updated_at = new Date().toISOString();
 
       const properties = memoryToNodeProperties(memory);
+      const cleared = clearedMemoryProperties(memory);
+
+      // `SET m += $properties` only sets provided keys and leaves existing
+      // ones untouched. Cleared optional fields (summary, effectiveness,
+      // last_accessed, updated_by, context_summary, and null context
+      // subfields) are omitted by memoryToNodeProperties, so `REMOVE` them
+      // explicitly to avoid leaving stale values on the node.
+      const removeClause =
+        cleared.length > 0
+          ? `REMOVE ${cleared.map((k) => `m.${k}`).join(", ")}`
+          : "";
 
       const query = `
         MATCH (m:Memory {id: $id})
         SET m += $properties
+        ${removeClause}
         RETURN m.id as id
       `;
       const result = await this.executeQuery(
@@ -540,8 +562,16 @@ export abstract class BaseFalkorDBBackend implements GraphBackend {
         MATCH (start:Memory {id: $memory_id})
         MATCH path=(start)-[r${relFilter}*1..${maxDepth}]-(related:Memory)
         WHERE related.id <> start.id
-        WITH DISTINCT related, relationships(path) as rels,
-             head(relationships(path)) as first_rel
+        // Aggregate to one row per related memory. relationships(path) (the
+        // edge list) differs for every path, so a memory reachable by
+        // multiple paths would otherwise produce a duplicate row and consume
+        // the LIMIT. Order by smallest path (shortest edge list) then take the
+        // first edge of that shortest path, so each related memory maps to a
+        // single, shortest, truthful first hop from the start node.
+        WITH related, relationships(path) as rels
+        WITH related, rels ORDER BY size(rels) ASC, related.id
+        WITH related, head(collect(rels)) as first_rels
+        WITH DISTINCT related, head(first_rels) as first_rel
         RETURN related,
                type(first_rel) as rel_type,
                properties(first_rel) as rel_props,
@@ -664,41 +694,43 @@ function isAlreadyExistsError(err: unknown): boolean {
  * `call db.indexes()` / `call db.constraints()`.
  *
  * FalkorDB returns these as a single row of flat scalar integer-keyed
- * entries (e.g. `{ "0": "id" }`). Some drivers may instead project a
- * richer map with a `properties` array plus `label` / `entitytype` / `type`
- * columns. Recursively walk every value and record strings found both as
- * scalar column values (including `properties` array elements) and as keys,
- * so schema detection does not miss properties stored in arrays.
+ * entries (e.g. `{ "0": "id" }`), or in some drivers as a richer map with a
+ * `properties` column holding the list of property names plus `label` /
+ * `entitytype` / `type` metadata. Only actual property-name-bearing sources
+ * are read:
+ *  - the `properties` column value (a list of names), and
+ *  - integer-keyed scalar rows (positional columns, `"0"`, `"1"`, ...).
+ *
+ * Other columns (label, type, status, provider, ...) and any map keys are
+ * deliberately ignored so a metadata value such as `status: "confidence"`
+ * can never satisfy a required-property check and make `schemaExists()`
+ * skip index creation.
  */
 function collectSchemaProperties(rows: Record<string, unknown>[] | null): Set<string> {
   const props = new Set<string>();
 
-  // Keys that are not real property names.
-  const nonPropertyKeys = new Set([
-    "id", "label", "entitytype", "type", "uniqueness", "types", "state",
-    "owningConstraint", "provider", "labelsOrTypes", "name", "idxname",
-  ]);
-
-  const visit = (value: unknown): void => {
+  const collectList = (value: unknown): void => {
+    // Collect string leaves from a value that is either a scalar string or a
+    // flat list/array of strings (e.g. the `properties` column). Nested maps
+    // are never descended, because their keys/values are metadata, not
+    // property names.
     if (typeof value === "string") {
       props.add(value);
-      return;
-    }
-    if (Array.isArray(value)) {
-      for (const v of value) visit(v);
-      return;
-    }
-    if (value !== null && typeof value === "object") {
-      for (const v of Object.values(value)) visit(v);
+    } else if (Array.isArray(value)) {
+      for (const v of value) collectList(v);
     }
   };
 
   for (const row of rows ?? []) {
     for (const [key, value] of Object.entries(row)) {
-      if (!nonPropertyKeys.has(key)) {
-        // `properties` column may hold a list of names; strings at this level
-        // (e.g. `{ "0": "id" }`) are candidate property names.
-        visit(value);
+      // Only treat integer-keyed scalar rows and the explicit `properties`
+      // column as carrying property names. Everything else (label, type,
+      // status, provider, options, ...) is schema metadata and is ignored, so
+      // a metadata value such as `status: "confidence"` can never satisfy a
+      // required-property check and cause schemaExists to skip the schema.
+      const isIntegerKey = /^\d+$/.test(key);
+      if (isIntegerKey || key === "properties") {
+        collectList(value);
       }
     }
   }
@@ -715,12 +747,23 @@ function collectSchemaProperties(rows: Record<string, unknown>[] | null): Set<st
 function toCypherMapLiteral(props: Record<string, unknown>): string {
   const parts: string[] = [];
   for (const key of Object.keys(props)) {
+    // Keys are emitted verbatim, so only accept valid Cypher identifiers.
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) continue;
     const value = props[key];
     if (value === null || value === undefined) continue;
     let literal: string;
     if (typeof value === "string") {
-      literal = `'${value.replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`;
-    } else if (typeof value === "number" || typeof value === "boolean") {
+      literal = `'${value
+        .replace(/\\/g, "\\\\")
+        .replace(/'/g, "\\'")
+        .replace(/\n/g, "\\n")
+        .replace(/\r/g, "\\r")
+        .replace(/\t/g, "\\t")}'`;
+    } else if (typeof value === "number") {
+      // `NaN` / `Infinity` are not valid Cypher number literals; skip them.
+      if (!Number.isFinite(value)) continue;
+      literal = String(value);
+    } else if (typeof value === "boolean") {
       literal = String(value);
     } else {
       continue; // nested objects/arrays not supported as inline rel props
