@@ -114,14 +114,18 @@ export class ContextRetriever {
 
       OPTIONAL MATCH (m)-[r]->(related:Memory)
       WHERE type(r) IN ['SOLVES', 'BUILDS_ON', 'REQUIRES', 'RELATED_TO']
+      // Filter null-id entries *inside* the collected list. When OPTIONAL
+      // MATCH finds no related memory it still emits one row with a null
+      // related/r; without the in-list filter an empty list id would be kept
+      // only by dropping the whole Memory row, which would remove standalone
+      // memories from ranking.
       WITH m, mentioned_entities,
-        collect(DISTINCT {
+        [x IN collect(DISTINCT {
           id: related.id,
           title: related.title,
           rel_type: type(r),
           rel_strength: coalesce(r.strength, 0.5)
-        }) as related_memories
-      WHERE all(rel IN related_memories WHERE rel IS NOT NULL AND rel.id IS NOT NULL)
+        }) WHERE x.id IS NOT NULL] as related_memories
 
       RETURN m.id as id,
              m.title as title,

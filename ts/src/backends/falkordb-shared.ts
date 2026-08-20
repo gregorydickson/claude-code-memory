@@ -81,6 +81,9 @@ export abstract class BaseFalkorDBBackend implements GraphBackend {
     this.client = null;
     this.graph = null;
     this._connected = false;
+    // A later connect() may target a recreated graph (or a freshly wiped
+    // database), so schema state must not be carried across connections.
+    this._schemaInitialized = false;
     console.log(`${this._display_name} connection closed`);
   }
 
@@ -207,68 +210,53 @@ export abstract class BaseFalkorDBBackend implements GraphBackend {
 
     console.log(`Initializing ${this._display_name} schema...`);
 
-    // The FalkorDB server does not accept the legacy `CREATE CONSTRAINT ON…`
-    // Cypher string and duplicate index creation is not idempotent, so use
-    // the client's native index/constraint helpers and treat "already
-    // exists" errors as success.
-    if (this.graph && typeof this.graph.createNodeRangeIndex === "function") {
-      for (const prop of indexProps) {
-        try {
-          await this.graph.createNodeRangeIndex("Memory", [prop]);
-        } catch (err) {
-          if (!isAlreadyExistsError(err)) {
-            console.warn(`Failed to create index on Memory(${prop}): ${err}`);
-          }
+    // FalkorDB (client-server and embedded lite) rejects the legacy
+    // `CREATE CONSTRAINT ON…` / `CREATE INDEX ON :...` Cypher strings, so the
+    // schema is created through the client's supported index/constraint
+    // helpers. Duplicate creation is not idempotent, so "already exists"
+    // errors from raced partial schema state are treated as success, but any
+    // genuine failure is still surfaced (not silently swallowed). Because both
+    // FalkorDB and FalkorDBLite expose these helpers on their `Graph` object,
+    // no divergent Cypher fallback is needed or supported.
+    if (!this.graph || typeof this.graph.createNodeRangeIndex !== "function") {
+      throw new DatabaseConnectionError(
+        `${this._display_name} graph does not support schema index creation`
+      );
+    }
+
+    // Supporting per-property range indexes.
+    for (const prop of indexProps) {
+      try {
+        await this.graph.createNodeRangeIndex("Memory", [prop]);
+      } catch (err) {
+        if (!isAlreadyExistsError(err)) {
+          console.warn(`Failed to create index on Memory(${prop}): ${err}`);
         }
       }
-      // UNIQUE constraint requires a supporting (exact-match) range index on
-      // the `id` property; both must exist before the constraint is created.
-      if (typeof this.graph.constraintCreate === "function") {
-        // Create the supporting range index and the constraint in separate
-        // try blocks. If the index already exists (e.g. a partial schema was
-        // built on a prior run) the constraint must still be attempted;
-        // otherwise a database that has the index but no constraint would
-        // silently accept duplicate Memory ids.
-        try {
-          await this.graph.createNodeRangeIndex("Memory", ["id"]);
-        } catch (err) {
-          if (!isAlreadyExistsError(err)) {
-            console.warn(`Failed to create range index on Memory(id): ${err}`);
-          }
-        }
-        try {
-          await this.graph.constraintCreate("UNIQUE", "NODE", "Memory", "id");
-        } catch (err) {
-          if (!isAlreadyExistsError(err)) {
-            console.warn(
-              `Failed to create UNIQUE constraint on Memory.id (legacy data may contain duplicate ids): ${err}`
-            );
-          }
+    }
+
+    // UNIQUE constraint requires a supporting (exact-match) range index on
+    // the `id` property; both must exist before the constraint is created.
+    if (typeof this.graph.constraintCreate === "function") {
+      // Create the supporting range index and the constraint in separate try
+      // blocks. If the index already exists (e.g. a partial schema was built
+      // on a prior run) the constraint must still be attempted; otherwise a
+      // database that has the index but no constraint would silently accept
+      // duplicate Memory ids.
+      try {
+        await this.graph.createNodeRangeIndex("Memory", ["id"]);
+      } catch (err) {
+        if (!isAlreadyExistsError(err)) {
+          console.warn(`Failed to create range index on Memory(id): ${err}`);
         }
       }
-    } else {
-      for (const constraint of [
-        "CREATE CONSTRAINT ON (m:Memory) ASSERT m.id IS UNIQUE",
-      ]) {
-        try {
-          await this.executeQuery(constraint, {}, true);
-        } catch (err) {
-          if (!isAlreadyExistsError(err)) {
-            console.warn(`Failed to create Memory.id constraint: ${err}`);
-          }
-        }
-      }
-      for (const index of indexProps) {
-        try {
-          await this.executeQuery(
-            `CREATE INDEX ON :Memory(${index})`,
-            {},
-            true
+      try {
+        await this.graph.constraintCreate("UNIQUE", "NODE", "Memory", "id");
+      } catch (err) {
+        if (!isAlreadyExistsError(err)) {
+          console.warn(
+            `Failed to create UNIQUE constraint on Memory.id (legacy data may contain duplicate ids): ${err}`
           );
-        } catch (err) {
-          if (!isAlreadyExistsError(err)) {
-            console.warn(`Failed to create index on Memory(${index}): ${err}`);
-          }
         }
       }
     }
@@ -289,18 +277,8 @@ export abstract class BaseFalkorDBBackend implements GraphBackend {
         this.executeQuery("call db.constraints()", {}, true),
       ]);
 
-      const existingIndexes = new Set<string>();
-      for (const row of indexResult ?? []) {
-        for (const value of Object.values(row)) {
-          if (typeof value === "string") existingIndexes.add(value);
-        }
-      }
-      const existingConstraints = new Set<string>();
-      for (const row of constraintResult ?? []) {
-        for (const value of Object.values(row)) {
-          if (typeof value === "string") existingConstraints.add(value);
-        }
-      }
+      const existingIndexes = collectSchemaProperties(indexResult);
+      const existingConstraints = collectSchemaProperties(constraintResult);
 
       const requiredIndexes = ["id", ...indexProps];
       const hasAllIndexes = requiredIndexes.every((prop) =>
@@ -679,6 +657,53 @@ function toIso(value: string | Date): string {
 function isAlreadyExistsError(err: unknown): boolean {
   const message = err instanceof Error ? err.message : String(err);
   return /already (indexed|exists)/i.test(message);
+}
+
+/**
+ * Collect the indexed/constrained property names from the result of
+ * `call db.indexes()` / `call db.constraints()`.
+ *
+ * FalkorDB returns these as a single row of flat scalar integer-keyed
+ * entries (e.g. `{ "0": "id" }`). Some drivers may instead project a
+ * richer map with a `properties` array plus `label` / `entitytype` / `type`
+ * columns. Recursively walk every value and record strings found both as
+ * scalar column values (including `properties` array elements) and as keys,
+ * so schema detection does not miss properties stored in arrays.
+ */
+function collectSchemaProperties(rows: Record<string, unknown>[] | null): Set<string> {
+  const props = new Set<string>();
+
+  // Keys that are not real property names.
+  const nonPropertyKeys = new Set([
+    "id", "label", "entitytype", "type", "uniqueness", "types", "state",
+    "owningConstraint", "provider", "labelsOrTypes", "name", "idxname",
+  ]);
+
+  const visit = (value: unknown): void => {
+    if (typeof value === "string") {
+      props.add(value);
+      return;
+    }
+    if (Array.isArray(value)) {
+      for (const v of value) visit(v);
+      return;
+    }
+    if (value !== null && typeof value === "object") {
+      for (const v of Object.values(value)) visit(v);
+    }
+  };
+
+  for (const row of rows ?? []) {
+    for (const [key, value] of Object.entries(row)) {
+      if (!nonPropertyKeys.has(key)) {
+        // `properties` column may hold a list of names; strings at this level
+        // (e.g. `{ "0": "id" }`) are candidate property names.
+        visit(value);
+      }
+    }
+  }
+
+  return props;
 }
 
 /**
