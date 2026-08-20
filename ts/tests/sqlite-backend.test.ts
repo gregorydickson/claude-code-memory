@@ -309,6 +309,57 @@ describe("SQLiteBackend search matching", () => {
     expect(results[0].title).toBe("Chromedriver autodownload");
   });
 
+  test("trims and de-duplicates explicit terms and drops empty ones", async () => {
+    await db.storeMemory(
+      createMemory({ type: "solution", title: "Chromedriver autodownload", content: "Namespaced flag." })
+    );
+    await db.storeMemory(
+      createMemory({ type: "solution", title: "Unrelated memory", content: "Nothing in common." })
+    );
+
+    const results = await db.searchMemories(
+      searchQuery({ query: undefined, terms: ["  Chromedriver  ", "chromedriver", "", "   "] })
+    );
+    expect(results.length).toBe(1);
+    expect(results[0].title).toBe("Chromedriver autodownload");
+  });
+
+  test("caps an oversized explicit terms list without failing", async () => {
+    await db.storeMemory(
+      createMemory({ type: "solution", title: "Chromedriver autodownload", content: "Namespaced flag." })
+    );
+
+    const terms = ["chromedriver", ...Array.from({ length: 300 }, (_, i) => `absent${i}`)];
+    const results = await db.searchMemories(searchQuery({ query: undefined, terms }));
+    expect(results.length).toBe(1);
+    expect(results[0].title).toBe("Chromedriver autodownload");
+  });
+
+  test("does not score the query phrase when explicit terms take precedence", async () => {
+    await db.storeMemory(
+      createMemory({
+        type: "solution",
+        title: "Alpha record",
+        content: "Mentions chromedriver only.",
+        importance: 0.9,
+      })
+    );
+    await db.storeMemory(
+      createMemory({
+        type: "solution",
+        title: "Beta record",
+        content: "Mentions chromedriver and the ignored phrase too.",
+        importance: 0.4,
+      })
+    );
+
+    const results = await db.searchMemories(
+      searchQuery({ query: "the ignored phrase", terms: ["chromedriver"] })
+    );
+    expect(results.length).toBe(2);
+    expect(results[0].title).toBe("Alpha record");
+  });
+
   test("treats an underscore in a term as a literal character", async () => {
     await db.storeMemory(
       createMemory({ type: "solution", title: "order_id lookup", content: "Literal underscore." })

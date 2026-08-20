@@ -247,12 +247,14 @@ export class SQLiteBackend implements GraphBackend {
     const relevanceParams: unknown[] = [];
 
     const phrase = searchQuery.query ? `%${escapeLikeValue(searchQuery.query)}%` : undefined;
+    const explicitTerms = normalizeSearchTerms(searchQuery.terms);
     const terms =
-      searchQuery.terms.length > 0
-        ? searchQuery.terms.map((term) => term.toLowerCase())
+      explicitTerms.length > 0
+        ? explicitTerms
         : searchQuery.query
           ? tokenizeSearchQuery(searchQuery.query)
           : [];
+    const termsCameFromQuery = explicitTerms.length === 0;
 
     if (terms.length > 0) {
       const joiner = searchQuery.match_mode === "all" ? " AND " : " OR ";
@@ -277,7 +279,7 @@ export class SQLiteBackend implements GraphBackend {
 
       conditions.push(`(${termConditions.join(joiner)})`);
 
-      if (phrase !== undefined) {
+      if (phrase !== undefined && termsCameFromQuery) {
         scoreParts.push(
           `(CASE WHEN title ${LIKE} THEN 12 ELSE 0 END)`,
           `(CASE WHEN content ${LIKE} THEN 6 ELSE 0 END)`
@@ -622,6 +624,17 @@ const LIKE = `LIKE ? ESCAPE '${LIKE_ESCAPE_CHAR}'`;
 
 function escapeLikeValue(value: string): string {
   return value.replace(/[\\%_]/g, (char) => `${LIKE_ESCAPE_CHAR}${char}`);
+}
+
+function normalizeSearchTerms(terms: string[]): string[] {
+  const normalized = new Set<string>();
+  for (const term of terms) {
+    const trimmed = term.trim().toLowerCase();
+    if (trimmed.length === 0) continue;
+    normalized.add(trimmed);
+    if (normalized.size >= MAX_SEARCH_TERMS) break;
+  }
+  return [...normalized];
 }
 
 function tokenizeSearchQuery(query: string): string[] {
