@@ -127,11 +127,15 @@ export async function getMemoryGraphVisualization(
   let params: Record<string, unknown>;
 
   if (centerMemoryId) {
+    // VAL-REVIEW-011: the previous query projected `collect(DISTINCT rel)`
+    // into `allRels` (consuming `rel` out of scope) and then referenced
+    // `id(rel)`/`startNode(rel)` in the next WITH — a guaranteed Cypher
+    // compile error that the catch turned into an always-empty graph.
+    // Keeping `rel` in scope through the aggregation fixes it.
     query = `
       MATCH path = (center:Memory {id: $center_id})-[*1..${depth}]-(m:Memory)
       WITH center, m, relationships(path) as rels
       UNWIND rels as rel
-      WITH center, m, collect(DISTINCT rel) as allRels
       WITH collect(DISTINCT center) + collect(DISTINCT m) as memories,
            collect(DISTINCT { id: id(rel), from_id: startNode(rel).id, to_id: endNode(rel).id, type: type(rel), strength: rel.strength }) as relationships
       RETURN memories, relationships
@@ -504,17 +508,23 @@ export async function identifyKnowledgeGaps(
 
   const gaps: KnowledgeGap[] = [];
 
-  // Find problems without solutions
+  // Find problems without solutions.
+  // VAL-REVIEW-009: `EXISTS { MATCH ... }` subqueries are unsupported on
+  // FalkorDB v4.16.3 (M14) — the previous form always threw and the catch
+  // below silently returned no gaps. OPTIONAL MATCH + count instead.
+  // VAL-REVIEW-010: the old project filter (`p.context CONTAINS`) matched a
+  // property that never exists — context is flattened to `context_*`
+  // properties at write time. Filter on `context_project_path`.
   let unsolvedQuery = `
     MATCH (p:Memory {type: 'problem'})
-    WHERE NOT EXISTS {
-      MATCH (p)<-[:SOLVES|ADDRESSES]-(:Memory)
-    }
+    OPTIONAL MATCH (p)<-[solved:SOLVES|ADDRESSES]-(s:Memory)
   `;
   if (project) {
-    unsolvedQuery += "AND (p.context CONTAINS $project)\n";
+    unsolvedQuery += "WHERE p.context_project_path CONTAINS $project\n";
   }
   unsolvedQuery += `
+    WITH p, count(DISTINCT solved) as solver_count
+    WHERE solver_count = 0
     RETURN p.id as id, p.title as title, p.tags as tags,
            p.created_at as created_at
     ORDER BY p.created_at DESC
@@ -554,7 +564,7 @@ export async function identifyKnowledgeGaps(
     WITH e, count(m) as mention_count
     WHERE mention_count <= 2
       AND mention_count > 0
-    RETURN e.text as entity, e.entity_type as type, mention_count
+    RETURN e.text as entity, e.type as type, mention_count
     LIMIT 10
   `;
 

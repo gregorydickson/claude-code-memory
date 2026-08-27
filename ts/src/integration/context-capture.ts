@@ -152,22 +152,33 @@ export async function captureTaskContext(
   // NOTE: FalkorDB v4.16.3 does not implement the Cypher `datetime`
   // function. Pass ISO 8601 timestamps as plain string params so this
   // works on the default falkordblite backend. See M14 / VAL-LOCAL-060.
+  //
+  // VAL-REVIEW-012: the MERGE key is `text` (matching the intelligence
+  // layer's entity namespace in entity-extraction.ts, whose readers match
+  // `e.text`) with `name` kept as a display alias, and the relationship is
+  // created with the id the MERGE actually RETURNed. The previous code
+  // linked with the freshly generated UUID, which only matched a node on
+  // first creation — every later capture of the same file silently dropped
+  // its INVOLVES edge.
   const nowIso = new Date().toISOString();
   for (const filePath of cleanFiles) {
     const fileId = randomUUID();
     try {
-      await backend.executeQuery(
+      const result = await backend.executeQuery(
         `
-        MERGE (f:Entity {name: $file_path, type: 'file'})
+        MERGE (f:Entity {text: $file_path, type: 'file'})
         ON CREATE SET f.id = $file_id, f.created_at = $now
+        ON MATCH SET f.last_seen = $now
+        SET f.name = $file_path
         RETURN f.id as id
         `,
         { file_path: filePath, file_id: fileId, now: nowIso },
         true
       );
+      const entityId = (result[0]?.["id"] as string) ?? fileId;
       await backend.createRelationship(
         memoryId,
-        fileId,
+        entityId,
         RelationshipType.INVOLVES,
         createRelationshipProperties({ strength: 1.0 })
       );
@@ -310,17 +321,22 @@ export async function analyzeErrorPatterns(
       found = true;
       for (const pattern of matching) {
         const patternId = pattern.id!;
-        // Increment frequency
+        // Increment frequency. VAL-REVIEW-016: the previous "increment"
+        // only SET m.updated_at — additional_metadata.frequency stayed 1
+        // forever. The metadata lives in a JSON-string property that
+        // Cypher cannot rewrite, so do the read-modify-write in JS via the
+        // backend's getMemory/updateMemory (updateMemory snapshots prior
+        // state on Cypher backends).
         try {
-          await backend.executeQuery(
-            `
-            MATCH (m:Memory {id: $pattern_id})
-            SET m.updated_at = $now
-            RETURN m.id as id
-            `,
-            { pattern_id: patternId, now: new Date().toISOString() },
-            true
-          );
+          const current = await backend.getMemory(patternId, false);
+          if (current?.context) {
+            const meta = {
+              ...((current.context.additional_metadata as Record<string, unknown>) ?? {}),
+            };
+            meta["frequency"] = ((meta["frequency"] as number) ?? 1) + 1;
+            current.context.additional_metadata = meta;
+            await backend.updateMemory(current);
+          }
         } catch (err) {
           console.warn(`Failed to update error pattern ${patternId}:`, err);
         }
@@ -391,35 +407,38 @@ export async function trackSolutionEffectiveness(
     console.warn(`Failed to track solution effectiveness:`, err);
   }
 
-  // Update error pattern with solution info via Cypher
+  // Update error pattern with solution info.
+  // VAL-REVIEW-016: the previous branches only SET updated_at —
+  // solutions_tried / successful_solutions were never written. Record the
+  // solution id in the pattern's metadata via read-modify-write.
   try {
-    const nowIso = new Date().toISOString();
-    if (success) {
-      await backend.executeQuery(
-        `
-        MATCH (m:Memory {id: $pattern_id})
-        SET m.updated_at = $now
-        RETURN m.id as id
-        `,
-        { pattern_id: errorPatternId, solution_id: solutionMemoryId, now: nowIso },
-        true
-      );
-    } else {
-      await backend.executeQuery(
-        `
-        MATCH (m:Memory {id: $pattern_id})
-        SET m.updated_at = $now
-        RETURN m.id as id
-        `,
-        { pattern_id: errorPatternId, solution_id: solutionMemoryId, now: nowIso },
-        true
-      );
+    const pattern = await backend.getMemory(errorPatternId, false);
+    if (pattern?.context) {
+      const meta = {
+        ...((pattern.context.additional_metadata as Record<string, unknown>) ?? {}),
+      };
+      const tried = Array.isArray(meta["solutions_tried"])
+        ? (meta["solutions_tried"] as string[])
+        : [];
+      if (!tried.includes(solutionMemoryId)) tried.push(solutionMemoryId);
+      meta["solutions_tried"] = tried;
+      if (success) {
+        const successful = Array.isArray(meta["successful_solutions"])
+          ? (meta["successful_solutions"] as string[])
+          : [];
+        if (!successful.includes(solutionMemoryId)) successful.push(solutionMemoryId);
+        meta["successful_solutions"] = successful;
+      }
+      pattern.context.additional_metadata = meta;
+      await backend.updateMemory(pattern);
     }
   } catch (err) {
     console.warn(`Failed to update error pattern solution info:`, err);
   }
 
-  // Update solution confidence based on effectiveness
+  // Update solution effectiveness from its SOLVES/ATTEMPTED_SOLUTION edge
+  // stats. VAL-REVIEW-016: the previous query computed the aggregates and
+  // then only SET updated_at, discarding them.
   try {
     await backend.executeQuery(
       `
@@ -427,7 +446,9 @@ export async function trackSolutionEffectiveness(
       MATCH (s)-[r:SOLVES|ATTEMPTED_SOLUTION]->(e:Memory {type: 'error'})
       WITH s, COUNT(r) as total_attempts,
            SUM(CASE WHEN type(r) = 'SOLVES' THEN 1 ELSE 0 END) as successes
-      SET s.updated_at = $now
+      SET s.effectiveness = CASE WHEN total_attempts > 0
+            THEN toFloat(successes) / total_attempts ELSE s.effectiveness END,
+          s.updated_at = $now
       RETURN s.id as id
       `,
       { solution_id: solutionMemoryId, now: new Date().toISOString() },

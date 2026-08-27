@@ -261,44 +261,46 @@ export class ContextRetriever {
     // `duration` functions. Compute the recency cutoff in JS as an ISO 8601
     // string and compare strings in-Cypher. See M14.
     const recentCutoffIso = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+    // VAL-REVIEW-009/010: the previous query used `NOT exists(...)` inside a
+    // list comprehension — unsupported on FalkorDB v4.16.3 (see M14 above)
+    // — and filtered `m.type = 'decision'`, a type that cannot exist in the
+    // MemoryType enum, so `decisions` was always empty. Solver state is now
+    // computed with OPTIONAL MATCH + count, and decisions are detected by
+    // the 'decision' tag (a value users can actually set).
     const query = `
       MATCH (m:Memory)
       WHERE $project IN m.tags
-
-      WITH m
+      OPTIONAL MATCH (m)<-[sv:SOLVES]-(:Memory)
+      WITH m, count(DISTINCT sv) as solver_count
       ORDER BY m.created_at DESC
-
-      WITH collect(m) as all_memories
-
-      WITH all_memories,
-        [m IN all_memories WHERE m.created_at >= $recent_cutoff][..10] as recent,
-        [m IN all_memories WHERE m.type = 'decision'][..5] as decisions,
-        [m IN all_memories WHERE m.type = 'problem' AND
-         NOT exists((m)<-[:SOLVES]-(:Memory))][..5] as open_problems,
-        [m IN all_memories WHERE m.type = 'solution'][..5] as solutions
-
+      WITH collect({ mem: m, solved: solver_count }) as rows
+      WITH rows,
+        [row IN rows WHERE row.mem.created_at >= $recent_cutoff][..10] as recent,
+        [row IN rows WHERE 'decision' IN row.mem.tags][..5] as decisions,
+        [row IN rows WHERE row.mem.type = 'problem' AND row.solved = 0][..5] as open_problems,
+        [row IN rows WHERE row.mem.type = 'solution'][..5] as solutions
       RETURN {
-        total_memories: size(all_memories),
-        recent_activity: [m IN recent | {
-          id: m.id,
-          title: m.title,
-          type: m.type,
-          created_at: m.created_at
+        total_memories: size(rows),
+        recent_activity: [row IN recent | {
+          id: row.mem.id,
+          title: row.mem.title,
+          type: row.mem.type,
+          created_at: row.mem.created_at
         }],
-        decisions: [m IN decisions | {
-          id: m.id,
-          title: m.title,
-          created_at: m.created_at
+        decisions: [row IN decisions | {
+          id: row.mem.id,
+          title: row.mem.title,
+          created_at: row.mem.created_at
         }],
-        open_problems: [m IN open_problems | {
-          id: m.id,
-          title: m.title,
-          created_at: m.created_at
+        open_problems: [row IN open_problems | {
+          id: row.mem.id,
+          title: row.mem.title,
+          created_at: row.mem.created_at
         }],
-        solutions: [m IN solutions | {
-          id: m.id,
-          title: m.title,
-          created_at: m.created_at
+        solutions: [row IN solutions | {
+          id: row.mem.id,
+          title: row.mem.title,
+          created_at: row.mem.created_at
         }]
       } as project_summary
     `;

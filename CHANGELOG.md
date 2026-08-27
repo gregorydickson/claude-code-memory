@@ -14,6 +14,76 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Workflow automation templates
 
 
+## [1.0.1] - 2026-08-27
+
+First patch release of the v1.0 line: a full correctness review of the data
+plane, backends, and tooling, with every verified finding fixed and covered by
+regression tests (403 → 417 tests). No public CLI or SDK surface changes
+(`CONTRACT.md` v1.0 remains intact).
+
+### Fixed — data loss
+
+- **Exports, counts, and migration verification no longer silently truncate
+  at 1000 memories.** `searchMemoriesPaginated` derived its total from a
+  single count query capped at 1000, so full-graph iteration stopped after
+  the first batch and migration verification passed despite missing data.
+- **Re-storing a memory no longer deletes its relationships on SQLite.**
+  `INSERT OR REPLACE` delete-reinserted the row, firing the foreign-key
+  cascade; the upsert now updates in place and preserves the original
+  `created_at`.
+- **Export/import round-trips are faithful**: relationship bi-temporal
+  metadata (`recorded_at`, `valid_from`, `valid_until`, validation stats)
+  and memory `created_at`/`updated_at`/`version`/`effectiveness`/
+  `usage_count`/`last_accessed` survive a backup/restore or migration.
+- **Relationship export no longer caps at 20 edges per memory** on Cypher
+  backends; the cap is lifted for export, `as-of`, and history queries
+  (`getRelatedMemories` accepts an optional `limit`).
+
+### Fixed — silent wrong answers
+
+- Session briefings, workflow session state, and knowledge-gap queries
+  report unsolved problems again: all `EXISTS { MATCH }` subqueries
+  (unsupported by FalkorDB v4.16.3) rewritten as `OPTIONAL MATCH` + count.
+- File-entity links survive repeated captures of the same file (the link
+  now uses the id the MERGE returned, and file entities share the
+  intelligence layer's `{text, type}` key).
+- `visualize <id>` returns a non-empty centered graph (variable-scope bug
+  in the Cypher aggregation).
+- `activity` works on the default falkordblite backend (shared Cypher
+  implementation for FalkorDB and Bolt backends, with cap surfacing).
+- `created_after` / `created_before` / `min_effectiveness` search filters
+  are honored by all local backends instead of being silently ignored.
+- Contextual search finds related matches that do not rank in the global
+  top results.
+- Learning features actually learn: pattern propagation traverses
+  creatable relationship types, workflow `success_rate` reflects failures
+  (was always 100%), and error-pattern frequency / solution effectiveness
+  are written instead of only touching `updated_at`.
+- `what-changed` sees relationships invalidated since the query time, not
+  only newly recorded ones.
+
+### Fixed — Cloudflare Worker (graph-worker)
+
+- RESP encoder declares UTF-8 byte lengths, fixing protocol desync on any
+  non-ASCII memory content.
+- Query timeouts invalidate the socket (no more response mispairing on the
+  inference loop); read timeout now exceeds the query timeout.
+- Edge `id`/`type` surfaced when parsing relationships (list endpoints no
+  longer report every edge as `RELATED_TO`).
+- Invalid query params (`?limit=abc`) and malformed JSON bodies return 4xx
+  instead of 500s; tags containing commas survive read-back.
+- Auth cache enforces key expiry; Cypher export escaping produces
+  re-importable files.
+
+### Fixed — other
+
+- Memgraph is accepted as a migration source/target.
+- Bolt schema init surfaces unexpected index failures instead of
+  swallowing them; Cloud backend sends `offset: 0` explicitly.
+- Entity extraction offsets bracket the entity text, not the match prefix.
+- Test-suite flakiness from un-awaited backend connects eliminated.
+
+
 > Remaining adversarial review findings and port completeness gaps are tracked in `master-plan.md`.
 
 ## [0.13.0] - 2026-07-05

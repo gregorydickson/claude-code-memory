@@ -382,7 +382,10 @@ export class CloudRESTAdapter implements GraphBackend {
     if (searchQuery.min_importance !== undefined && searchQuery.min_importance !== null)
       payload["min_importance"] = searchQuery.min_importance;
     if (searchQuery.limit) payload["limit"] = searchQuery.limit;
-    if (searchQuery.offset) payload["offset"] = searchQuery.offset;
+    // VAL-REVIEW-021: offset=0 is falsy and was silently dropped from the
+    // payload; send it whenever it is defined.
+    if (searchQuery.offset !== undefined && searchQuery.offset !== null)
+      payload["offset"] = searchQuery.offset;
 
     const result = await this.request("POST", "/search/advanced", payload);
     const items = (result["memories"] as Record<string, unknown>[]) ?? (result["results"] as Record<string, unknown>[]) ?? [];
@@ -471,11 +474,14 @@ export class CloudRESTAdapter implements GraphBackend {
 
   async getRelatedMemories(
     memoryId: string,
-    opts?: { relationshipTypes?: string[]; maxDepth?: number }
+    opts?: { relationshipTypes?: string[]; maxDepth?: number; limit?: number }
   ): Promise<[Memory, Relationship][]> {
     const params: Record<string, string> = { max_depth: String(opts?.maxDepth ?? 1) };
     if (opts?.relationshipTypes && opts.relationshipTypes.length > 0) {
       params["relationship_types"] = opts.relationshipTypes.join(",");
+    }
+    if (opts?.limit !== undefined) {
+      params["limit"] = String(opts.limit);
     }
 
     try {

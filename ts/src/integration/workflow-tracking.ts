@@ -246,18 +246,22 @@ export async function suggestWorkflow(
   > = {};
 
   for (const [, actions] of Object.entries(sessionActions)) {
-    // Filter successful actions and sort by created_at
-    const successful = actions
-      .filter((a) => getMetadata(a)["success"] === true)
-      .sort((a, b) => {
-        const ta = new Date(a.created_at as string).getTime();
-        const tb = new Date(b.created_at as string).getTime();
-        return ta - tb;
-      });
+    // Sort ALL actions by created_at. VAL-REVIEW-015: the previous code
+    // built signatures from successful actions only and then counted
+    // count++/successes++ in lockstep on that pre-filtered set, so
+    // success_rate was mathematically always 1.0 and failed sessions were
+    // invisible to the ranking. Now every session contributes its
+    // signature to `count`, and only fully-successful sessions increment
+    // `successes`, making success_rate a real rate in [0, 1].
+    const sorted = [...actions].sort((a, b) => {
+      const ta = new Date(a.created_at as string).getTime();
+      const tb = new Date(b.created_at as string).getTime();
+      return ta - tb;
+    });
 
-    if (successful.length < 3) continue;
+    if (sorted.length < 3) continue;
 
-    const actionSequence = successful
+    const actionSequence = sorted
       .slice(0, 10)
       .map((a) => (getMetadata(a)["action_type"] as string) ?? "unknown")
       .join(" -> ");
@@ -274,9 +278,10 @@ export async function suggestWorkflow(
 
     const pat = workflowPatterns[actionSequence]!;
     pat.count += 1;
-    pat.successes += 1; // Already filtered for success
+    const sessionSucceeded = sorted.every((a) => getMetadata(a)["success"] !== false);
+    if (sessionSucceeded) pat.successes += 1;
 
-    const lastActivity = successful[successful.length - 1]!.created_at;
+    const lastActivity = sorted[sorted.length - 1]!.created_at;
     if (lastActivity) {
       const lastDate = new Date(lastActivity as string);
       if (!pat.last_used || lastDate > pat.last_used) {
@@ -496,16 +501,19 @@ export async function getSessionState(
     console.warn(`Failed to fetch recent actions:`, err);
   }
 
-  // Find open problems (errors without solutions) via Cypher
+  // Find open problems (errors without solutions) via Cypher.
+  // VAL-REVIEW-009: `EXISTS { MATCH ... }` subqueries are unsupported on
+  // FalkorDB v4.16.3 (M14) — the previous form always threw and this catch
+  // silently returned no open problems. OPTIONAL MATCH + count instead.
   let openProblems: string[] = [];
   try {
     const result = await backend.executeQuery(
       `
       MATCH (e:Memory {type: 'error'})<-[:EXHIBITS]-(a:Memory {type: 'workflow'})
       WHERE (a)-[:IN_SESSION]->(:Entity {id: $session_id})
-      AND NOT EXISTS {
-        MATCH (e)<-[:SOLVES]-(:Memory)
-      }
+      OPTIONAL MATCH (e)<-[solved:SOLVES]-(s:Memory)
+      WITH e, count(DISTINCT solved) as solver_count
+      WHERE solver_count = 0
       RETURN DISTINCT e.title as problem
       LIMIT 10
       `,

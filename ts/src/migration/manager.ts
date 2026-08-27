@@ -401,6 +401,16 @@ export class MigrationManager {
             config.password
           );
         }
+        case "memgraph": {
+          // VAL-REVIEW-022: validateBackendConfig accepts memgraph sources
+          // and targets, but creation previously rejected them. (neo4j
+          // stays rejected: its backend is a stub that throws.)
+          return BackendFactory.createMemgraph(
+            config.uri,
+            config.username,
+            config.password
+          );
+        }
         default:
           throw new MigrationError(
             `Backend type ${config.backend_type} not yet supported for migration`

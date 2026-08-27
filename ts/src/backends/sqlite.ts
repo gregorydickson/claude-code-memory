@@ -245,12 +245,34 @@ export class SQLiteBackend implements GraphBackend {
     const contextJson = memory.context ? JSON.stringify(memory.context) : null;
 
     try {
+      // Upsert via ON CONFLICT DO UPDATE — NOT INSERT OR REPLACE. REPLACE
+      // deletes + reinserts the row, which fires the relationships FK
+      // ON DELETE CASCADE (PRAGMA foreign_keys=ON) and silently destroys
+      // every relationship of an existing memory (VAL-REVIEW-002). The
+      // upsert updates in place, preserving relationships. `created_at`
+      // keeps its original value on conflict: creation time is immutable
+      // identity, and importFromJson relies on it surviving re-import.
       this.db
         .prepare(
-          `INSERT OR REPLACE INTO memories
+          `INSERT INTO memories
            (id, type, title, content, summary, tags, importance, confidence, effectiveness,
             usage_count, created_at, updated_at, last_accessed, version, updated_by, context)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(id) DO UPDATE SET
+             type = excluded.type,
+             title = excluded.title,
+             content = excluded.content,
+             summary = excluded.summary,
+             tags = excluded.tags,
+             importance = excluded.importance,
+             confidence = excluded.confidence,
+             effectiveness = excluded.effectiveness,
+             usage_count = excluded.usage_count,
+             updated_at = excluded.updated_at,
+             last_accessed = excluded.last_accessed,
+             version = excluded.version,
+             updated_by = excluded.updated_by,
+             context = excluded.context`
         )
         .run(
           memory.id,
@@ -342,6 +364,31 @@ export class SQLiteBackend implements GraphBackend {
     if (searchQuery.min_confidence !== undefined && searchQuery.min_confidence !== null) {
       conditions.push("confidence >= ?");
       params.push(searchQuery.min_confidence);
+    }
+
+    // VAL-REVIEW-019: honor the date/effectiveness filters the schema
+    // promises (previously silently ignored).
+    if (searchQuery.min_effectiveness !== undefined && searchQuery.min_effectiveness !== null) {
+      conditions.push("effectiveness >= ?");
+      params.push(searchQuery.min_effectiveness);
+    }
+
+    if (searchQuery.created_after) {
+      conditions.push("created_at >= ?");
+      params.push(
+        searchQuery.created_after instanceof Date
+          ? searchQuery.created_after.toISOString()
+          : searchQuery.created_after
+      );
+    }
+
+    if (searchQuery.created_before) {
+      conditions.push("created_at <= ?");
+      params.push(
+        searchQuery.created_before instanceof Date
+          ? searchQuery.created_before.toISOString()
+          : searchQuery.created_before
+      );
     }
 
     const whereClause = conditions.length > 0 ? conditions.join(" AND ") : "1=1";
@@ -488,7 +535,7 @@ export class SQLiteBackend implements GraphBackend {
 
   async getRelatedMemories(
     memoryId: string,
-    opts?: { relationshipTypes?: string[]; maxDepth?: number }
+    opts?: { relationshipTypes?: string[]; maxDepth?: number; limit?: number }
   ): Promise<[Memory, Relationship][]> {
     if (!this.db) throw new DatabaseConnectionError("Not connected");
     const maxDepth = Math.max(1, Math.min(Number(opts?.maxDepth ?? 2) || 2, 10));
@@ -551,6 +598,12 @@ export class SQLiteBackend implements GraphBackend {
       if (currentLevel.length === 0) break;
     }
 
+    // VAL-REVIEW-018: honor opts.limit when provided (Cypher backends cap
+    // at 20 by default); sqlite historically returned everything, so the
+    // default here remains uncapped for behavior parity.
+    if (opts?.limit !== undefined) {
+      return results.slice(0, Math.max(0, Math.trunc(opts.limit)));
+    }
     return results;
   }
 
@@ -677,8 +730,12 @@ export class SQLiteBackend implements GraphBackend {
     if (!this.db) throw new DatabaseConnectionError("Not connected");
     const sinceIso = since instanceof Date ? since.toISOString() : String(since);
     const rows = this.db
-      .prepare("SELECT * FROM relationships WHERE recorded_at >= ? ORDER BY recorded_at ASC")
-      .all(sinceIso) as unknown as RelRow[];
+      .prepare(
+        `SELECT * FROM relationships
+         WHERE recorded_at >= ? OR (valid_until IS NOT NULL AND valid_until >= ?)
+         ORDER BY recorded_at ASC`
+      )
+      .all(sinceIso, sinceIso) as unknown as RelRow[];
 
     const relationships: Relationship[] = [];
     for (const row of rows) {

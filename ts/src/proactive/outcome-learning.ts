@@ -214,9 +214,13 @@ async function propagateToPatterns(
 ): Promise<void> {
   console.debug(`Propagating outcome to related patterns for memory ${memoryId}`);
 
+  // VAL-REVIEW-014: the traversal previously used :DERIVED_FROM|USES|APPLIES —
+  // none of which are in the RelationshipType enum, so no such edge can
+  // ever be created and the query always matched zero rows. Use the
+  // equivalent creatable types instead.
   const patternQuery = `
     MATCH (m:Memory {id: $memory_id})
-    MATCH (m)-[:DERIVED_FROM|USES|APPLIES]->(p:Memory {type: 'code_pattern'})
+    MATCH (m)-[:APPLIES_TO|USED_IN|BUILDS_ON]-(p:Memory {type: 'code_pattern'})
     RETURN p.id as pattern_id, p.effectiveness as effectiveness
   `;
 
@@ -255,9 +259,12 @@ export async function updatePatternEffectiveness(
     `Updating pattern ${patternId} effectiveness: success=${success}, impact=${impact}`
   );
 
+  // VAL-REVIEW-014: same enum fix as propagateToPatterns — traverse
+  // creatable relationship types. (:RESULTED_IN)/(:Outcome) are real:
+  // recordOutcome creates them via raw Cypher.
   const statsQuery = `
     MATCH (p:Memory {id: $pattern_id, type: 'code_pattern'})
-    OPTIONAL MATCH (p)-[:DERIVED_FROM|USES|APPLIES]-(m:Memory)-[:RESULTED_IN]->(o:Outcome)
+    OPTIONAL MATCH (p)-[:APPLIES_TO|USED_IN|BUILDS_ON]-(m:Memory)-[:RESULTED_IN]->(o:Outcome)
     RETURN p.effectiveness as current_effectiveness,
            p.confidence as current_confidence,
            p.usage_count as usage_count,

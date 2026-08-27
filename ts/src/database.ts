@@ -23,6 +23,33 @@ import {
 import type { GraphBackend } from "./backends/index.ts";
 import { createRelationshipProperties } from "./models.ts";
 
+/**
+ * Count the FULL match set for a search query by paging through it in
+ * batches. Backends expose no COUNT-with-filters method, so this is the
+ * only way to get an exact total without a per-backend count query.
+ * (VAL-REVIEW-001: a single capped count query truncated at 1000.)
+ */
+async function countAllMatches(
+  backend: Pick<GraphBackend, "searchMemories">,
+  searchQuery: SearchQuery
+): Promise<number> {
+  const COUNT_BATCH = 1000;
+  let total = 0;
+  let offset = 0;
+  // Fetch batches until one comes back short. Any batch of exactly
+  // COUNT_BATCH rows may have successors.
+  for (;;) {
+    const batch = await backend.searchMemories({
+      ...searchQuery,
+      limit: COUNT_BATCH,
+      offset,
+    });
+    total += batch.length;
+    if (batch.length < COUNT_BATCH) return total;
+    offset += COUNT_BATCH;
+  }
+}
+
 export interface IMemoryDatabase {
   initializeSchema(): Promise<void>;
   close(): Promise<void>;
@@ -40,7 +67,7 @@ export interface IMemoryDatabase {
   ): Promise<string>;
   getRelatedMemories(
     memoryId: string,
-    opts?: { relationshipTypes?: string[]; maxDepth?: number }
+    opts?: { relationshipTypes?: string[]; maxDepth?: number; limit?: number }
   ): Promise<[Memory, Relationship][]>;
   getMemoryStatistics(): Promise<Record<string, unknown>>;
   getRecentActivity?(days?: number, project?: string | null): Promise<Record<string, unknown>>;
@@ -92,20 +119,19 @@ export class MemoryDatabase implements IMemoryDatabase {
   }
 
   async searchMemoriesPaginated(searchQuery: SearchQuery): Promise<PaginatedResult> {
-    // For Cypher backends that support pagination, query total count
     const memories = await this.backend.searchMemories({
       ...searchQuery,
       limit: searchQuery.limit,
       offset: searchQuery.offset,
     });
 
-    // Get total count (simplified - in production, run a separate count query)
-    const allMatches = await this.backend.searchMemories({
-      ...searchQuery,
-      limit: 1000,
-      offset: 0,
-    });
-    const totalCount = allMatches.length;
+    // Exact total count: page through the FULL match set in batches. A
+    // single count query capped at limit 1000 silently truncated pagination
+    // at exactly 1000 matches (has_more flipped false at the boundary), so
+    // paginateMemories/getAllMemories stopped after the first batch and
+    // exportToJson / migration verification silently dropped everything
+    // past the first 1000 rows (VAL-REVIEW-001).
+    const totalCount = await countAllMatches(this.backend, searchQuery);
     const hasMore = searchQuery.offset + memories.length < totalCount;
     const nextOffset = hasMore ? searchQuery.offset + searchQuery.limit : undefined;
 
@@ -138,7 +164,7 @@ export class MemoryDatabase implements IMemoryDatabase {
 
   async getRelatedMemories(
     memoryId: string,
-    opts?: { relationshipTypes?: string[]; maxDepth?: number }
+    opts?: { relationshipTypes?: string[]; maxDepth?: number; limit?: number }
   ): Promise<[Memory, Relationship][]> {
     return this.backend.getRelatedMemories(memoryId, opts);
   }
@@ -312,7 +338,7 @@ export class CloudMemoryDatabase implements IMemoryDatabase {
 
   async getRelatedMemories(
     memoryId: string,
-    opts?: { relationshipTypes?: string[]; maxDepth?: number }
+    opts?: { relationshipTypes?: string[]; maxDepth?: number; limit?: number }
   ): Promise<[Memory, Relationship][]> {
     return this.backend.getRelatedMemories(memoryId, opts);
   }

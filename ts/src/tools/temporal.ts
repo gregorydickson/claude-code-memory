@@ -74,10 +74,13 @@ export const handleQueryAsOf = neverThrowBoundary(
       }
     }
 
-    // Query as of the specified time - filter by valid_from/valid_until
+    // Query as of the specified time - filter by valid_from/valid_until.
+    // VAL-REVIEW-012: lift the interactive LIMIT 20 so as-of analysis sees
+    // every relationship, including invalidated historical edges.
     const related = await db.getRelatedMemories(memoryId, {
       relationshipTypes: args["relationship_types"],
       maxDepth: 2,
+      limit: 10000,
     });
 
     // Filter relationships that were valid at the specified time
@@ -154,10 +157,12 @@ export const handleGetRelationshipHistory = neverThrowBoundary(
       }
     }
 
-    // Get all related memories (including invalidated ones)
+    // Get all related memories (including invalidated ones).
+    // VAL-REVIEW-012: lift the interactive LIMIT 20 for history.
     const history = await db.getRelatedMemories(memoryId, {
       relationshipTypes: args["relationship_types"],
       maxDepth: 2,
+      limit: 10000,
     });
 
     let text = `**Relationship History for ${memoryId}** (${history.length} relationships):\n\n`;

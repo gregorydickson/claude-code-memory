@@ -29,6 +29,7 @@ import {
   ValidationError,
 } from "../errors.ts";
 import { parseMemoryFromProperties } from "../utils/memory-parser.ts";
+import { runRecentActivity } from "./recent-activity.ts";
 
 /** Maximum traversal depth for relationship queries. */
 const MAX_TRAVERSAL_DEPTH = 10;
@@ -372,6 +373,25 @@ export abstract class BaseFalkorDBBackend implements GraphBackend {
         parameters["min_confidence"] = searchQuery.min_confidence;
       }
 
+      // VAL-REVIEW-019: these SearchQuery fields were accepted by the schema
+      // but silently ignored by every local backend — queries returned rows
+      // outside the requested date/effectiveness bounds. created_at is an
+      // ISO string, so lexicographic comparison is chronologically correct.
+      if (searchQuery.min_effectiveness !== undefined && searchQuery.min_effectiveness !== null) {
+        conditions.push("m.effectiveness >= $min_effectiveness");
+        parameters["min_effectiveness"] = searchQuery.min_effectiveness;
+      }
+
+      if (searchQuery.created_after) {
+        conditions.push("m.created_at >= $created_after");
+        parameters["created_after"] = toIso(searchQuery.created_after);
+      }
+
+      if (searchQuery.created_before) {
+        conditions.push("m.created_at <= $created_before");
+        parameters["created_before"] = toIso(searchQuery.created_before);
+      }
+
       const whereClause = conditions.length > 0 ? conditions.join(" AND ") : "true";
 
       const query = `
@@ -545,11 +565,15 @@ export abstract class BaseFalkorDBBackend implements GraphBackend {
 
   async getRelatedMemories(
     memoryId: string,
-    opts?: { relationshipTypes?: string[]; maxDepth?: number }
+    opts?: { relationshipTypes?: string[]; maxDepth?: number; limit?: number }
   ): Promise<[Memory, Relationship][]> {
     try {
       const relTypes = opts?.relationshipTypes;
       const maxDepth = Math.max(1, Math.min(Number(opts?.maxDepth ?? 2) || 2, MAX_TRAVERSAL_DEPTH));
+      // VAL-REVIEW-018: the LIMIT 20 cap was invisible to callers (export,
+      // as-of analysis). Callers may now lift it via opts.limit; the
+      // interactive default stays 20.
+      const rowLimit = Math.max(1, Math.min(Math.trunc(Number(opts?.limit ?? 20) || 20), 10000));
 
       let relFilter = "";
       if (relTypes && relTypes.length > 0) {
@@ -582,7 +606,7 @@ export abstract class BaseFalkorDBBackend implements GraphBackend {
                startNode(rel).id as from_id,
                endNode(rel).id as to_id
         ORDER BY rel.strength DESC, related.importance DESC
-        LIMIT 20
+        LIMIT ${rowLimit}
       `;
 
       const result = await this.executeQuery(query, { memory_id: memoryId }, false);
@@ -632,6 +656,19 @@ export abstract class BaseFalkorDBBackend implements GraphBackend {
       console.error(`Failed to get related memories for ${memoryId}: ${err}`);
       throw new DatabaseConnectionError(`Failed to get related memories: ${err}`);
     }
+  }
+
+  // -----------------------------------------------------------------------
+  // Recent activity (VAL-REVIEW-017: shared Cypher port of the sqlite impl)
+  // -----------------------------------------------------------------------
+
+  async getRecentActivity(days = 7, project?: string | null): Promise<Record<string, unknown>> {
+    return runRecentActivity(
+      (query, parameters, write) => this.executeQuery(query, parameters, write),
+      this._display_name,
+      days,
+      project
+    );
   }
 
   // -----------------------------------------------------------------------
@@ -901,6 +938,7 @@ export abstract class BaseFalkorDBBackend implements GraphBackend {
       const query = `
         MATCH (from:Memory)-[r]->(to:Memory)
         WHERE r.recorded_at >= $since
+           OR (r.valid_until IS NOT NULL AND r.valid_until >= $since)
         RETURN r.id as id, type(r) as rel_type, properties(r) as rel_props,
                from.id as from_id, to.id as to_id
         ORDER BY r.recorded_at ASC

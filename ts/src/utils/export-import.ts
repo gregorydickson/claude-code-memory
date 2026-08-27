@@ -38,6 +38,14 @@ export async function exportToJson(
       created_at: toIso(memory.created_at),
       updated_at: toIso(memory.updated_at),
     };
+    // VAL-REVIEW-023: export the tracked-effectiveness fields so the
+    // round trip preserves them (previously dropped here AND on import,
+    // silently flattening every memory to defaults on restore/migrate).
+    if (memory.effectiveness !== null && memory.effectiveness !== undefined)
+      memDict["effectiveness"] = memory.effectiveness;
+    if (memory.usage_count) memDict["usage_count"] = memory.usage_count;
+    if (memory.last_accessed) memDict["last_accessed"] = toIso(memory.last_accessed);
+    if (memory.version) memDict["version"] = memory.version;
     if (memory.context) {
       const ctx: Record<string, unknown> = {};
       const ctxFields = [
@@ -133,6 +141,14 @@ export async function importFromJson(
         importance: (memData["importance"] as number) ?? 0.5,
         confidence: (memData["confidence"] as number) ?? 0.8,
         context: memData["context"] as Partial<MemoryContext> | undefined,
+        // VAL-REVIEW-023: restore the exported timestamps and tracked
+        // fields instead of resetting them to import-time defaults.
+        created_at: memData["created_at"] as string | undefined,
+        updated_at: memData["updated_at"] as string | undefined,
+        effectiveness: (memData["effectiveness"] as number | null) ?? null,
+        usage_count: (memData["usage_count"] as number) ?? 0,
+        last_accessed: (memData["last_accessed"] as string) ?? null,
+        version: (memData["version"] as number) ?? 1,
       });
 
       await db.storeMemory(memory);
@@ -171,16 +187,36 @@ export async function importFromJson(
       }
 
       const propsData = (relData["properties"] as Record<string, unknown>) ?? {};
+      // VAL-REVIEW-023: restore the bi-temporal metadata so a restore or
+      // migration keeps relationship history instead of stamping everything
+      // with import-time timestamps. Only include keys actually present:
+      // spreading `key: undefined` over createRelationshipProperties would
+      // nullify its schema defaults (and trip NOT NULL constraints).
+      const relProps: Record<string, unknown> = {
+        strength: (propsData["strength"] as number) ?? 0.5,
+        confidence: (propsData["confidence"] as number) ?? 0.8,
+        evidence_count: (propsData["evidence_count"] as number) ?? 1,
+      };
+      if (typeof propsData["context"] === "string") relProps["context"] = propsData["context"];
+      for (const key of [
+        "success_rate",
+        "created_at",
+        "last_validated",
+        "validation_count",
+        "counter_evidence_count",
+        "valid_from",
+        "valid_until",
+        "recorded_at",
+        "invalidated_by",
+      ]) {
+        const value = propsData[key];
+        if (value !== undefined && value !== null) relProps[key] = value;
+      }
       await db.createRelationship(
         relData["from_memory_id"] as string,
         relData["to_memory_id"] as string,
         relType,
-        createRelationshipProperties({
-          strength: (propsData["strength"] as number) ?? 0.5,
-          confidence: (propsData["confidence"] as number) ?? 0.8,
-          context: (propsData["context"] as string) ?? undefined,
-          evidence_count: (propsData["evidence_count"] as number) ?? 1,
-        })
+        createRelationshipProperties(relProps)
       );
       importedRelationships++;
     } catch (err) {
@@ -273,7 +309,10 @@ async function exportRelationships(
   for (const memory of memories) {
     if (!memory.id) continue;
     try {
-      const related = await db.getRelatedMemories(memory.id, { maxDepth: 1 });
+      // VAL-REVIEW-018: lift the getRelatedMemories row cap for export; the
+      // interactive default (20 on Cypher backends) silently truncated
+      // memories with more relationships.
+      const related = await db.getRelatedMemories(memory.id, { maxDepth: 1, limit: 10000 });
       for (const [, rel] of related) {
         const key = `${rel.from_memory_id}|${rel.to_memory_id}|${rel.type}`;
         if (!relMap.has(key)) {
@@ -286,6 +325,17 @@ async function exportRelationships(
               confidence: rel.properties.confidence,
               context: rel.properties.context,
               evidence_count: rel.properties.evidence_count,
+              // VAL-REVIEW-023: export the full property set so the round
+              // trip preserves bi-temporal metadata and validation stats.
+              success_rate: rel.properties.success_rate,
+              created_at: rel.properties.created_at,
+              last_validated: rel.properties.last_validated,
+              validation_count: rel.properties.validation_count,
+              counter_evidence_count: rel.properties.counter_evidence_count,
+              valid_from: rel.properties.valid_from,
+              valid_until: rel.properties.valid_until,
+              recorded_at: rel.properties.recorded_at,
+              invalidated_by: rel.properties.invalidated_by,
             },
           });
         }

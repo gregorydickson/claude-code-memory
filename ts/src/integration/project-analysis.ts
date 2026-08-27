@@ -517,21 +517,27 @@ export async function trackFileChanges(
       console.warn(`Failed to link file change to project:`, err);
     }
 
-    // Create or get file entity and link
+    // Create or get file entity and link.
+    // VAL-REVIEW-012: link with the id the MERGE RETURNed (not the fresh
+    // UUID, which only matches on first creation), and merge on `text` —
+    // the intelligence layer's entity namespace — with `name` as alias.
     const fileId = randomUUID();
     try {
-      await backend.executeQuery(
+      const result = await backend.executeQuery(
         `
-        MERGE (f:Entity {name: $file_path, type: 'file'})
+        MERGE (f:Entity {text: $file_path, type: 'file'})
         ON CREATE SET f.id = $file_id, f.created_at = $now
+        ON MATCH SET f.last_seen = $now
+        SET f.name = $file_path
         RETURN f.id as id
         `,
         { file_path: filePath, file_id: fileId, now: new Date().toISOString() },
         true
       );
+      const entityId = (result[0]?.["id"] as string) ?? fileId;
       await backend.createRelationship(
         memoryId,
-        fileId,
+        entityId,
         changeType === "modified" ? RelationshipType.MODIFIES : RelationshipType.CREATES,
         createRelationshipProperties({ strength: 1.0 })
       );

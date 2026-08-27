@@ -175,36 +175,21 @@ const _handleContextualSearch = handleToolErrors(
     const query = args["query"] as string;
     const maxDepth = (args["max_depth"] as number) ?? 2;
 
-    const related = await db.getRelatedMemories(memoryId, { maxDepth });
+    const related = await db.getRelatedMemories(memoryId, { maxDepth, limit: 10000 });
     if (related.length === 0) {
       return `No related memories found for context: ${memoryId}`;
     }
 
-    const relatedIds = new Set(related.map(([mem]) => mem.id));
-
-    const searchQuery: SearchQuery = {
-      query,
-      terms: [],
-      memory_types: [],
-      tags: [],
-      project_path: undefined,
-      languages: [],
-      frameworks: [],
-      min_importance: undefined,
-      min_confidence: undefined,
-      min_effectiveness: undefined,
-      created_after: undefined,
-      created_before: undefined,
-      limit: 100,
-      offset: 0,
-      include_relationships: true,
-      search_tolerance: "normal",
-      match_mode: "any",
-      relationship_filter: undefined,
-    };
-
-    const allMatches = await db.searchMemories(searchQuery);
-    const contextualMatches = allMatches.filter((mem) => mem.id && relatedIds.has(mem.id));
+    // VAL-REVIEW-024: match the query directly against the related
+    // memories. The previous implementation ran a GLOBAL search capped at
+    // limit 100 and intersected the results with the related-id set, so a
+    // related memory that did not rank in the global top-100 for the query
+    // was reported as "no matches within context".
+    const needle = query.toLowerCase();
+    const contextualMatches = related.filter(([mem]) => {
+      const haystack = `${mem.title}\n${mem.content}\n${mem.summary ?? ""}`.toLowerCase();
+      return haystack.includes(needle);
+    });
 
     if (contextualMatches.length === 0) {
       return `No matches found for '${query}' within the context of ${memoryId}`;
@@ -213,13 +198,13 @@ const _handleContextualSearch = handleToolErrors(
     let text = `**Contextual Search Results:**\n\n`;
     text += `Context: ${memoryId}\n`;
     text += `Query: '${query}'\n`;
-    text += `Searched within ${relatedIds.size} related memories\n`;
+    text += `Searched within ${related.length} related memories\n`;
     text += `Found ${contextualMatches.length} matches:\n\n`;
 
     for (let i = 0; i < contextualMatches.length; i++) {
-      const mem = contextualMatches[i];
+      const [mem, rel] = contextualMatches[i];
       text += `${i + 1}. **${mem.title}** (ID: ${mem.id})\n`;
-      text += `   Type: ${mem.type} | Importance: ${mem.importance}\n`;
+      text += `   Type: ${mem.type} | Importance: ${mem.importance} | Via: ${rel.type}\n`;
       if (mem.summary) {
         text += `   Summary: ${mem.summary}\n`;
       } else if (mem.content) {

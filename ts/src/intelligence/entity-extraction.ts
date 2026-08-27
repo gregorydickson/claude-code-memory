@@ -233,8 +233,17 @@ export class EntityExtractor {
 
           const confidence = this.calculateConfidence(entityType, entityText);
 
-          const start = Math.max(0, match.index - 50);
-          const end = Math.min(text.length, match.index + entityText.length + 50);
+          // VAL-REVIEW-013: match.index points at the start of the WHOLE
+          // match, but entityText may be a capture group that starts later
+          // (e.g. `@([\w-]+)` group 1 starts after '@'). Offset by the
+          // group's position inside the match so start/end bracket the
+          // entity text itself.
+          const groupOffset = match[0].indexOf(entityText);
+          const entityStart =
+            match.index + (groupOffset >= 0 ? groupOffset : 0);
+
+          const start = Math.max(0, entityStart - 50);
+          const end = Math.min(text.length, entityStart + entityText.length + 50);
           const context = text.slice(start, end);
 
           entities.push({
@@ -242,8 +251,8 @@ export class EntityExtractor {
             entity_type: entityType,
             confidence,
             context,
-            start_pos: match.index,
-            end_pos: match.index + entityText.length,
+            start_pos: entityStart,
+            end_pos: entityStart + entityText.length,
           });
 
           // Guard against zero-length matches causing infinite loops.

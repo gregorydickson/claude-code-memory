@@ -265,17 +265,22 @@ export async function generateSessionBriefing(
     console.error(`Error fetching recent activities: ${message}`);
   }
 
-  // Unresolved problems
+  // Unresolved problems. VAL-REVIEW-009: FalkorDB v4.16.3 does not support
+  // the `EXISTS { MATCH ... }` subquery syntax (see the M14 note in
+  // intelligence/context-retrieval.ts). The previous query used it, always
+  // threw, and the catch below silently reported zero unresolved problems.
+  // Solver membership is computed with OPTIONAL MATCH + count instead.
   const problemsQuery = `
     MATCH (p:Memory {type: 'problem'})
     WHERE (p.context_project_path = $project_path OR p.context_project_path CONTAINS $project_name)
-      AND NOT EXISTS {
-        MATCH (p)<-[:SOLVES|ADDRESSES]-(:Memory)
-      }
     OPTIONAL MATCH (p)-[r]-()
+    OPTIONAL MATCH (p)<-[solved:SOLVES|ADDRESSES]-(s:Memory)
+    WITH p, r, solved
+    WITH p, count(DISTINCT r) as related_count, count(DISTINCT solved) as solver_count
+    WHERE solver_count = 0
     RETURN p.id as id, p.title as title, p.content as content,
            p.created_at as created_at, p.tags as tags,
-           count(r) as related_count
+           related_count
     ORDER BY p.created_at DESC
     LIMIT 5
   `;

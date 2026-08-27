@@ -279,7 +279,7 @@ class ThrowingBackend implements GraphBackend {
   }
   async getRelatedMemories(
     _memoryId: string,
-    _opts?: { relationshipTypes?: string[]; maxDepth?: number }
+    _opts?: { relationshipTypes?: string[]; maxDepth?: number; limit?: number }
   ): Promise<[Memory, Relationship][]> {
     this.boom();
   }

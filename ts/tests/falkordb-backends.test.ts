@@ -118,28 +118,23 @@ describe("MemgraphBackend", () => {
 });
 
 describe("BackendFactory integration", () => {
-  test("factory registers falkordb in backend names", () => {
+  test("factory registers falkordb in backend names", async () => {
     // The factory should accept "falkordb" as a valid backend type.
     // It will try to connect, but we just verify the dispatch doesn't
     // throw an "unknown backend" error (connection errors are expected
-    // without a running server).
-    try {
-      BackendFactory.createBackendByType("falkordb");
-    } catch (err) {
-      // Connection errors are fine - we just want to verify it's not
-      // an "unknown backend" error
+    // without a running server). The promise MUST be awaited: a floating
+    // connect rejects seconds later and the unhandled rejection fails
+    // whatever unrelated test is running at that moment
+    // (VAL-REVIEW-026).
+    await BackendFactory.createBackendByType("falkordb").catch((err) => {
       expect(String(err)).not.toContain("Unknown backend");
-    }
+    });
   });
 
-  test("factory registers memgraph in backend names", () => {
-    try {
-      BackendFactory.createBackendByType("memgraph");
-    } catch (err) {
-      // Connection errors are fine - we just want to verify it's not
-      // an "unknown backend" error
+  test("factory registers memgraph in backend names", async () => {
+    await BackendFactory.createBackendByType("memgraph").catch((err) => {
       expect(String(err)).not.toContain("Unknown backend");
-    }
+    });
   });
 
   test("isBackendConfigured returns true for falkordblite and sqlite", () => {

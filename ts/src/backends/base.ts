@@ -59,7 +59,7 @@ export interface GraphBackend {
   ): Promise<string>;
   getRelatedMemories(
     memoryId: string,
-    opts?: { relationshipTypes?: string[]; maxDepth?: number }
+    opts?: { relationshipTypes?: string[]; maxDepth?: number; limit?: number }
   ): Promise<[Memory, Relationship][]>;
 
   // Statistics
