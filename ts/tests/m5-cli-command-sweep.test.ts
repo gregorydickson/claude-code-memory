@@ -486,7 +486,7 @@ describe("VAL-LOCAL-048: every CLI command runs on default falkordblite without 
   test("config exits 0 with configuration", () => {
     const r = runFalkordbliteCli(["config"], { falkordblitePath: sweepStore });
     expect(r.status).toBe(0);
-    expect(r.stderr).toContain("MemoryGraph CLI v0.100.0");
+    expect(r.stderr).toContain("MemoryGraph CLI v0.14.0");
     assertNoStackTrace("config", r);
   });
 });

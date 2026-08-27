@@ -14,7 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Workflow automation templates
 
 
-## [0.100.0] - 2026-08-27
+## [0.14.0] - 2026-08-27
 
 A full correctness review of the data plane, backends, and tooling, with
 every verified finding fixed and covered by regression tests
@@ -22,7 +22,7 @@ every verified finding fixed and covered by regression tests
 enumerated in `CONTRACT.md` are unchanged.
 
 **Versioning note:** the earlier v1.0 freeze was rolled back — 1.0 was
-premature. The project continues on 0.x versioning (0.100.x patch line);
+premature. The project continues on 0.x versioning (0.14.x patch line);
 see the updated semver commitment in `CONTRACT.md`. The previously
 published `v1.0.1` tag/release was withdrawn and superseded by this one.
 

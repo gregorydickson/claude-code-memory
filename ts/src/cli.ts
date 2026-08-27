@@ -59,7 +59,7 @@ import { captureTaskContext } from "./integration/context-capture.ts";
 import { detectProject, analyzeCodebase } from "./integration/project-analysis.ts";
 import { trackWorkflow, suggestWorkflow } from "./integration/workflow-tracking.ts";
 
-const VERSION = "0.100.0";
+const VERSION = "0.14.0";
 
 /** Error that signals the CLI should exit with a specific code.Thrown from
  *  inside try blocks so that `finally { await close() }` runs before exit. */

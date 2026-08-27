@@ -1,6 +1,6 @@
 {
   "name": "memorygraph",
-  "version": "0.100.0",
+  "version": "0.14.0",
   "description": "Graph-based memory CLI for AI coding agents with intelligent relationship tracking and multi-backend support",
   "type": "module",
   "main": "src/index.ts",

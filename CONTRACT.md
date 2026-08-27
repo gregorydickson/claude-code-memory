@@ -1,10 +1,10 @@
-# MemoryGraph v0.100.0 — Public Contract
+# MemoryGraph v0.14.0 — Public Contract
 
-**Enumerated at:** `v0.100.0` (`ts/package.json` version `0.100.0`)
+**Enumerated at:** `v0.14.0` (`ts/package.json` version `0.14.0`)
 **Semver commitment:** The surfaces enumerated in this document are the public
-contract. The project deliberately remains pre-1.0: within the `0.100.x`
+contract. The project deliberately remains pre-1.0: within the `0.14.x`
 patch line these surfaces will not change in a backwards-incompatible way.
-Under 0.x conventions a minor bump (`0.101.0+`) may carry breaking changes,
+Under 0.x conventions a minor bump (`0.15.0+`) may carry breaking changes,
 but any such change to an enumerated surface must be called out explicitly
 in `CHANGELOG.md`. Additive changes (new commands, new optional flags, new
 SDK methods) are permitted in any release. A full stability freeze resumes
@@ -22,7 +22,7 @@ There are exactly two public surfaces:
 
 ---
 
-## 1. CLI Command Surface (34 commands, enumerated at v0.100.0)
+## 1. CLI Command Surface (34 commands, enumerated at v0.14.0)
 
 Invocation: `memorygraph <command> [options]` (also: `node src/cli.ts <command>`,
 `./memorygraph <command>` for the Bun-compiled binary).
@@ -316,7 +316,7 @@ No CLI command path may exit with an unhandled exception / raw stack trace
 
 ---
 
-## 2. SDK / Library Surface (enumerated at v0.100.0)
+## 2. SDK / Library Surface (enumerated at v0.14.0)
 
 The library surface is the typed exports of `ts/src/index.ts` (in-process
 Node module) and `ts/src/sdk/index.ts` (cloud API client). Importing
@@ -326,7 +326,7 @@ Node module) and `ts/src/sdk/index.ts` (cloud API client). Importing
 
 #### Version
 ```ts
-export const VERSION: string;  // "0.100.0"
+export const VERSION: string;  // "0.14.0"
 ```
 
 #### Models — re-exported from `ts/src/models.ts`
@@ -609,7 +609,7 @@ export class ValidationError extends MemoryGraphError { ... }
 export class ServerError extends MemoryGraphError { ... }
 ```
 
-The Cloud SDK is **Tier 2** and is out of scope for the v0.100.0 local-mode
+The Cloud SDK is **Tier 2** and is out of scope for the v0.14.0 local-mode
 integration contract; its method signatures are nonetheless pinned here so
 external cloud consumers can rely on them. Behavioral changes to cloud
 egress/redaction/TLS/retention are governed by the Tier 2 roadmap, not this
@@ -617,7 +617,7 @@ contract.
 
 ---
 
-## 3. RelationshipType Enum (enumerated at v0.100.0)
+## 3. RelationshipType Enum (enumerated at v0.14.0)
 
 The full set of valid relationship types (used by `link`, `import`, and
 validated by `createRelationship` on every backend — SEC-11):
