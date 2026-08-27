@@ -14,12 +14,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Workflow automation templates
 
 
-## [1.0.1] - 2026-08-27
+## [0.100.0] - 2026-08-27
 
-First patch release of the v1.0 line: a full correctness review of the data
-plane, backends, and tooling, with every verified finding fixed and covered by
-regression tests (403 → 417 tests). No public CLI or SDK surface changes
-(`CONTRACT.md` v1.0 remains intact).
+A full correctness review of the data plane, backends, and tooling, with
+every verified finding fixed and covered by regression tests
+(403 → 431 tests). No public CLI or SDK surface changes — the surfaces
+enumerated in `CONTRACT.md` are unchanged.
+
+**Versioning note:** the earlier v1.0 freeze was rolled back — 1.0 was
+premature. The project continues on 0.x versioning (0.100.x patch line);
+see the updated semver commitment in `CONTRACT.md`. The previously
+published `v1.0.1` tag/release was withdrawn and superseded by this one.
 
 ### Fixed — data loss
 

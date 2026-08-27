@@ -167,7 +167,7 @@ describe("Real CLI command execution (VAL-FREEZE-009)", () => {
     expect(r.stdout).toContain("memorygraph");
     // v1.0.0 freeze — the version output should reflect the bumped package
     // version.
-    expect(r.stdout).toContain("1.0.0");
+    expect(r.stdout).toContain("0.100.0");
   });
 
   test("`memorygraph unknown-cmd` exits non-zero with an Unknown command message", () => {
@@ -180,7 +180,7 @@ describe("Real CLI command execution (VAL-FREEZE-009)", () => {
   test("`memorygraph config` exits 0 and prints configuration", () => {
     const r = runCli(["config"], { backend: "falkordblite" });
     expect(r.code).toBe(0);
-    expect(r.stderr).toContain("MemoryGraph CLI v1.0.0");
+    expect(r.stderr).toContain("MemoryGraph CLI v0.100.0");
     expect(r.stderr).toContain("Backend:");
   });
 
