@@ -21,6 +21,22 @@ export function parseMemoryFromProperties(
   source = "unknown"
 ): Memory | null {
   try {
+    // FalkorDB JS client returns nodes as { id, labels, properties: {...} }.
+    // Unwrap so the flat property record is used directly. A `properties`
+    // field that is null or an array is not a valid property record, so only
+    // unwrap a plain (non-null, non-array) object.
+    if (
+      nodeData !== null &&
+      typeof nodeData === "object" &&
+      !Array.isArray(nodeData) &&
+      "properties" in nodeData &&
+      nodeData["properties"] !== null &&
+      !Array.isArray(nodeData["properties"]) &&
+      typeof nodeData["properties"] === "object"
+    ) {
+      nodeData = nodeData["properties"] as Record<string, unknown>;
+    }
+
     const typeRaw = nodeData["type"] as string;
     const type = isMemoryType(typeRaw) ? typeRaw : MemoryType.GENERAL;
 

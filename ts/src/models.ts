@@ -300,12 +300,89 @@ export function memoryToNodeProperties(memory: Memory): Record<string, unknown> 
   return props;
 }
 
+/**
+ * Known optional property keys (as stored in the graph) that may be removed
+ * when cleared, plus every supported `context_*` field name.
+ */
+const SCHEMA_OPTIONAL_PROPERTIES = [
+  "summary",
+  "effectiveness",
+  "last_accessed",
+  "updated_by",
+  "context_summary",
+];
+
+/** Every supported context field name (prefixes with `context_`). */
+const SCHEMA_CONTEXT_PROPERTIES = Object.keys(MemoryContextSchema.shape).map(
+  (key) => `context_${key}`
+);
+
+/**
+ * The set of graph property names that may appear in a `REMOVE` clause.
+ * Restricts derived keys to known schema fields so that runtime context keys
+ * (e.g. from `memory.context`) can never inject arbitrary Cypher text.
+ */
+const CLEARABLE_GRAPH_PROPERTIES = new Set<string>([
+  ...SCHEMA_OPTIONAL_PROPERTIES,
+  ...SCHEMA_CONTEXT_PROPERTIES,
+]);
+
+/**
+ * Property keys (as stored in the graph) that must be *removed* before an
+ * update, because `memoryToNodeProperties` omits cleared optional fields and
+ * `SET m += $properties` would otherwise leave the stale value on the node.
+ *
+ * Cleared means the field is explicitly null/undefined on the incoming memory
+ * (or a context subfield is null). Optional scalar fields (`summary`,
+ * `effectiveness`, `last_accessed`, `updated_by`, `context_summary`) and every
+ * `context_*` key whose value is nullish are removed. When `memory.context` is
+ * entirely null/undefined, all supported context properties are removed.
+ *
+ * Returned keys are restricted to a schema whitelist and are therefore safe to
+ * interpolate into a Cypher `REMOVE` clause.
+ */
+/** Stored properties cleared by an empty string, matching `memoryToNodeProperties`. */
+const EMPTY_STRING_CLEARS = new Set<string>(["summary", "last_accessed"]);
+
+export function clearedMemoryProperties(memory: Memory): string[] {
+  const removed: string[] = [];
+  for (const prop of SCHEMA_OPTIONAL_PROPERTIES) {
+    const value = memory[prop as keyof Memory];
+    if (value === null || value === undefined) {
+      removed.push(prop);
+    } else if (EMPTY_STRING_CLEARS.has(prop) && value === "") {
+      removed.push(prop);
+    }
+  }
+
+  if (!memory.context) {
+    // A null/undefined context means every stored context field is cleared.
+    removed.push(...SCHEMA_CONTEXT_PROPERTIES);
+  } else {
+    for (const key of SCHEMA_CONTEXT_PROPERTIES) {
+      const contextKey = key.slice("context_".length) as keyof MemoryContext;
+      const value = memory.context[contextKey];
+      if (value === null || value === undefined) removed.push(key);
+    }
+  }
+
+  return removed;
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-function toIso(value: string | Date): string {
-  return value instanceof Date ? value.toISOString() : value;
+export function toIso(value: string | Date): string {
+  // Normalize every timestamp to a canonical ISO-8601 form (UTC, 3-digit
+  // milliseconds). `value` is validated by the Zod `datetime()`/`date()`
+  // schemas, so preserving a supplied string verbatim could otherwise store
+  // variable fractional precision (e.g. ".0000Z" vs ".000Z") that compares
+  // incorrectly when later used in a lexical timestamp comparison.
+  if (value instanceof Date) return value.toISOString();
+  const parsed = new Date(value);
+  if (!isNaN(parsed.getTime())) return parsed.toISOString();
+  return value;
 }
 
 export function parseDate(value: string | Date): Date {

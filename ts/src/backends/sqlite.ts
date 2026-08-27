@@ -316,10 +316,54 @@ export class SQLiteBackend implements GraphBackend {
     const conditions: string[] = [];
     const params: unknown[] = [];
 
-    if (searchQuery.query) {
-      conditions.push("(title LIKE ? OR content LIKE ? OR summary LIKE ?)");
-      const pattern = `%${searchQuery.query}%`;
-      params.push(pattern, pattern, pattern);
+    let relevanceSql = "0";
+    const relevanceParams: unknown[] = [];
+
+    const phrase = searchQuery.query ? `%${escapeLikeValue(searchQuery.query)}%` : undefined;
+    const explicitTerms = normalizeSearchTerms(searchQuery.terms);
+    const terms =
+      explicitTerms.length > 0
+        ? explicitTerms
+        : searchQuery.query
+          ? tokenizeSearchQuery(searchQuery.query)
+          : [];
+    const termsCameFromQuery = explicitTerms.length === 0;
+
+    if (terms.length > 0) {
+      const joiner = searchQuery.match_mode === "all" ? " AND " : " OR ";
+      const termConditions: string[] = [];
+      const scoreParts: string[] = [];
+
+      for (const term of terms) {
+        const pattern = `%${escapeLikeValue(term)}%`;
+        termConditions.push(
+          `(title ${LIKE} OR content ${LIKE} OR summary ${LIKE} OR tags ${LIKE})`
+        );
+        params.push(pattern, pattern, pattern, pattern);
+
+        scoreParts.push(
+          `(CASE WHEN title ${LIKE} THEN 4 ELSE 0 END)`,
+          `(CASE WHEN tags ${LIKE} THEN 3 ELSE 0 END)`,
+          `(CASE WHEN summary ${LIKE} THEN 2 ELSE 0 END)`,
+          `(CASE WHEN content ${LIKE} THEN 1 ELSE 0 END)`
+        );
+        relevanceParams.push(pattern, pattern, pattern, pattern);
+      }
+
+      conditions.push(`(${termConditions.join(joiner)})`);
+
+      if (phrase !== undefined && termsCameFromQuery) {
+        scoreParts.push(
+          `(CASE WHEN title ${LIKE} THEN 12 ELSE 0 END)`,
+          `(CASE WHEN content ${LIKE} THEN 6 ELSE 0 END)`
+        );
+        relevanceParams.push(phrase, phrase);
+      }
+
+      relevanceSql = scoreParts.join(" + ");
+    } else if (phrase !== undefined) {
+      conditions.push(`(title ${LIKE} OR content ${LIKE} OR summary ${LIKE})`);
+      params.push(phrase, phrase, phrase);
     }
 
     if (searchQuery.memory_types.length > 0) {
@@ -392,14 +436,20 @@ export class SQLiteBackend implements GraphBackend {
     }
 
     const whereClause = conditions.length > 0 ? conditions.join(" AND ") : "1=1";
-    params.push(searchQuery.limit);
-    params.push(searchQuery.offset ?? 0);
+    const boundParams = [
+      ...relevanceParams,
+      ...params,
+      searchQuery.limit,
+      searchQuery.offset ?? 0,
+    ];
 
     const rows = this.db
       .prepare(
-        `SELECT * FROM memories WHERE ${whereClause} ORDER BY importance DESC, created_at DESC LIMIT ? OFFSET ?`
+        `SELECT * FROM (
+           SELECT *, ${relevanceSql} AS relevance FROM memories WHERE ${whereClause}
+         ) ORDER BY relevance DESC, importance DESC, created_at DESC LIMIT ? OFFSET ?`
       )
-      .all(...(params as any[])) as Record<string, unknown>[];
+      .all(...(boundParams as any[])) as Record<string, unknown>[];
 
     return rows.map(rowToMemory).filter((m): m is Memory => m !== null);
   }
@@ -793,6 +843,67 @@ export class SQLiteBackend implements GraphBackend {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+const SEARCH_STOPWORDS = new Set([
+  "a", "an", "and", "any", "are", "as", "at", "be", "but", "by", "for", "from",
+  "how", "in", "into", "is", "it", "its", "of", "on", "or", "that", "the",
+  "their", "them", "then", "there", "these", "they", "this", "to", "was",
+  "were", "what", "when", "where", "which", "who", "why", "with",
+]);
+
+const MAX_SEARCH_TERMS = 12;
+
+const LIKE_ESCAPE_CHAR = "\\";
+
+const LIKE = `LIKE ? ESCAPE '${LIKE_ESCAPE_CHAR}'`;
+
+/**
+ * Escape the LIKE wildcards `%` and `_` so a value is compared literally.
+ *
+ * Pair with the {@link LIKE} operator fragment, which supplies the matching
+ * ESCAPE clause.
+ */
+function escapeLikeValue(value: string): string {
+  return value.replace(/[\\%_]/g, (char) => `${LIKE_ESCAPE_CHAR}${char}`);
+}
+
+/**
+ * Normalize a caller-supplied list of search terms.
+ *
+ * Trims and lowercases each entry, discards empty ones, de-duplicates, and
+ * caps the result at {@link MAX_SEARCH_TERMS} so the generated SQL stays
+ * within SQLite's expression limits.
+ */
+function normalizeSearchTerms(terms: string[]): string[] {
+  const normalized = new Set<string>();
+  for (const term of terms) {
+    const trimmed = term.trim().toLowerCase();
+    if (trimmed.length === 0) continue;
+    normalized.add(trimmed);
+    if (normalized.size >= MAX_SEARCH_TERMS) break;
+  }
+  return [...normalized];
+}
+
+/**
+ * Split a natural-language query into search terms.
+ *
+ * Retains intra-word punctuation so dotted, hyphenated and underscored
+ * identifiers survive as single terms, discards stopwords and single
+ * characters, de-duplicates, and caps the result at {@link MAX_SEARCH_TERMS}.
+ * Returns an empty array when nothing usable remains, leaving the caller to
+ * fall back to matching the raw query string.
+ */
+function tokenizeSearchQuery(query: string): string[] {
+  const terms = new Set<string>();
+  for (const raw of query.toLowerCase().split(/[^\p{L}\p{N}_.\-/]+/u)) {
+    const term = raw.replace(/^[.\-/]+|[.\-/]+$/g, "");
+    if (term.length < 2 || SEARCH_STOPWORDS.has(term)) continue;
+    terms.add(term);
+    if (terms.size >= MAX_SEARCH_TERMS) break;
+  }
+  return [...terms];
+}
 
 function toIso(value: string | Date): string {
   return value instanceof Date ? value.toISOString() : value;

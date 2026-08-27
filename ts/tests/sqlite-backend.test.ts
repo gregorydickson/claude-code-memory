@@ -303,3 +303,251 @@ describe("SQLiteBackend", () => {
     });
   });
 });
+
+const SEARCH_TEST_DB = join(tmpdir(), `mg-search-test-${Date.now()}.db`);
+
+describe("SQLiteBackend search matching", () => {
+  let backend: SQLiteBackend;
+  let db: MemoryDatabase;
+
+  const searchQuery = (overrides: Record<string, unknown>) => ({
+    query: undefined,
+    terms: [],
+    memory_types: [],
+    tags: [],
+    project_path: undefined,
+    languages: [],
+    frameworks: [],
+    min_importance: undefined,
+    min_confidence: undefined,
+    min_effectiveness: undefined,
+    created_after: undefined,
+    created_before: undefined,
+    limit: 50,
+    offset: 0,
+    include_relationships: true,
+    search_tolerance: "normal" as const,
+    match_mode: "any" as const,
+    relationship_filter: undefined,
+    ...overrides,
+  });
+
+  beforeEach(async () => {
+    backend = new SQLiteBackend(SEARCH_TEST_DB);
+    await backend.connect();
+    await backend.initializeSchema();
+    db = new MemoryDatabase(backend);
+  });
+
+  afterEach(async () => {
+    await backend.disconnect();
+    try {
+      if (existsSync(SEARCH_TEST_DB)) unlinkSync(SEARCH_TEST_DB);
+    } catch {
+      // ignore
+    }
+  });
+
+  test("matches a multi-word query whose words are not adjacent", async () => {
+    await db.storeMemory(
+      createMemory({
+        type: "solution",
+        title: "Pinch zoom crashes Safari on iOS",
+        content: "Reproduced on a physical iPhone after two gesture cycles.",
+      })
+    );
+
+    const results = await db.searchMemories(searchQuery({ query: "iOS pinch crash" }));
+    expect(results.length).toBe(1);
+  });
+
+  test("is insensitive to word order", async () => {
+    await db.storeMemory(
+      createMemory({ type: "error", title: "Setup traps that wasted time", content: "Four traps." })
+    );
+
+    const forward = await db.searchMemories(searchQuery({ query: "wasted time" }));
+    const reversed = await db.searchMemories(searchQuery({ query: "time wasted" }));
+    expect(forward.length).toBe(1);
+    expect(reversed.length).toBe(1);
+  });
+
+  test("matches terms against tags", async () => {
+    await db.storeMemory(
+      createMemory({
+        type: "workflow",
+        title: "Device automation",
+        content: "Start the server.",
+        tags: ["appium", "android"],
+      })
+    );
+
+    const results = await db.searchMemories(searchQuery({ query: "appium setup" }));
+    expect(results.length).toBe(1);
+  });
+
+  test("match_mode 'all' requires every term to match", async () => {
+    await db.storeMemory(
+      createMemory({ type: "solution", title: "Android pinch zoom", content: "Works via W3C actions." })
+    );
+    await db.storeMemory(
+      createMemory({ type: "solution", title: "Endsheet fade in", content: "Delayed reveal." })
+    );
+
+    const any = await db.searchMemories(searchQuery({ query: "android endsheet", match_mode: "any" }));
+    expect(any.length).toBe(2);
+
+    const all = await db.searchMemories(searchQuery({ query: "android endsheet", match_mode: "all" }));
+    expect(all.length).toBe(0);
+  });
+
+  test("honours an explicit terms list", async () => {
+    await db.storeMemory(
+      createMemory({ type: "solution", title: "Chromedriver autodownload", content: "Namespaced flag." })
+    );
+
+    const results = await db.searchMemories(
+      searchQuery({ query: "ignored when terms are given", terms: ["chromedriver"] })
+    );
+    expect(results.length).toBe(1);
+  });
+
+  test("applies an explicit terms list when no query is given", async () => {
+    await db.storeMemory(
+      createMemory({ type: "solution", title: "Chromedriver autodownload", content: "Namespaced flag." })
+    );
+    await db.storeMemory(
+      createMemory({ type: "solution", title: "Unrelated memory", content: "Nothing in common." })
+    );
+
+    const results = await db.searchMemories(
+      searchQuery({ query: undefined, terms: ["chromedriver"] })
+    );
+    expect(results.length).toBe(1);
+    expect(results[0].title).toBe("Chromedriver autodownload");
+  });
+
+  test("trims and de-duplicates explicit terms and drops empty ones", async () => {
+    await db.storeMemory(
+      createMemory({ type: "solution", title: "Chromedriver autodownload", content: "Namespaced flag." })
+    );
+    await db.storeMemory(
+      createMemory({ type: "solution", title: "Unrelated memory", content: "Nothing in common." })
+    );
+
+    const results = await db.searchMemories(
+      searchQuery({ query: undefined, terms: ["  Chromedriver  ", "chromedriver", "", "   "] })
+    );
+    expect(results.length).toBe(1);
+    expect(results[0].title).toBe("Chromedriver autodownload");
+  });
+
+  test("caps an oversized explicit terms list without failing", async () => {
+    await db.storeMemory(
+      createMemory({ type: "solution", title: "Chromedriver autodownload", content: "Namespaced flag." })
+    );
+
+    const terms = ["chromedriver", ...Array.from({ length: 300 }, (_, i) => `absent${i}`)];
+    const results = await db.searchMemories(searchQuery({ query: undefined, terms }));
+    expect(results.length).toBe(1);
+    expect(results[0].title).toBe("Chromedriver autodownload");
+  });
+
+  test("does not score the query phrase when explicit terms take precedence", async () => {
+    await db.storeMemory(
+      createMemory({
+        type: "solution",
+        title: "Alpha record",
+        content: "Mentions chromedriver only.",
+        importance: 0.9,
+      })
+    );
+    await db.storeMemory(
+      createMemory({
+        type: "solution",
+        title: "Beta record",
+        content: "Mentions chromedriver and the ignored phrase too.",
+        importance: 0.4,
+      })
+    );
+
+    const results = await db.searchMemories(
+      searchQuery({ query: "the ignored phrase", terms: ["chromedriver"] })
+    );
+    expect(results.length).toBe(2);
+    expect(results[0].title).toBe("Alpha record");
+  });
+
+  test("treats an underscore in a term as a literal character", async () => {
+    await db.storeMemory(
+      createMemory({ type: "solution", title: "order_id lookup", content: "Literal underscore." })
+    );
+    await db.storeMemory(
+      createMemory({ type: "solution", title: "orderXid lookup", content: "Wildcard would match this." })
+    );
+
+    const results = await db.searchMemories(searchQuery({ query: "order_id" }));
+    expect(results.length).toBe(1);
+    expect(results[0].title).toBe("order_id lookup");
+  });
+
+  test("does not treat a wildcard-only query as a match-all", async () => {
+    await db.storeMemory(
+      createMemory({ type: "solution", title: "First memory", content: "Content one." })
+    );
+    await db.storeMemory(
+      createMemory({ type: "solution", title: "Second memory", content: "Content two." })
+    );
+
+    expect((await db.searchMemories(searchQuery({ query: "%" }))).length).toBe(0);
+    expect((await db.searchMemories(searchQuery({ query: "%%" }))).length).toBe(0);
+  });
+
+  test("ranks a title match above a more important body-only match", async () => {
+    await db.storeMemory(
+      createMemory({
+        type: "solution",
+        title: "Unrelated title",
+        content: "Mentions pagination once.",
+        importance: 0.9,
+      })
+    );
+    await db.storeMemory(
+      createMemory({
+        type: "solution",
+        title: "Pagination offset fix",
+        content: "Unrelated body.",
+        importance: 0.4,
+      })
+    );
+
+    const results = await db.searchMemories(searchQuery({ query: "pagination" }));
+    expect(results.length).toBe(2);
+    expect(results[0].title).toBe("Pagination offset fix");
+  });
+
+  test("keeps punctuation inside identifiers", async () => {
+    await db.storeMemory(
+      createMemory({ type: "fix", title: "next.config.js rewrite", content: "Proxy the embed route." })
+    );
+    await db.storeMemory(
+      createMemory({ type: "fix", title: "Unrelated", content: "No config reference here." })
+    );
+
+    const results = await db.searchMemories(searchQuery({ query: "next.config.js" }));
+    expect(results.length).toBe(1);
+    expect(results[0].title).toBe("next.config.js rewrite");
+  });
+
+  test("falls back to the raw query when only stopwords remain", async () => {
+    await db.storeMemory(
+      createMemory({ type: "solution", title: "The and of", content: "Literal phrase in title." })
+    );
+
+    const hit = await db.searchMemories(searchQuery({ query: "the and of" }));
+    expect(hit.length).toBe(1);
+
+    const miss = await db.searchMemories(searchQuery({ query: "of and the" }));
+    expect(miss.length).toBe(0);
+  });
+});
