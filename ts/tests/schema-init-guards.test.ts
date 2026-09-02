@@ -20,6 +20,7 @@ import { describe, test, expect } from "bun:test";
 import {
   isBenignSchemaError,
   isAlreadyExistsError,
+  isUnsupportedProcedureError,
   isOperationalNodeRow,
   collectIndexedRangeProps,
   operationalMemoryConstraintPresent,
@@ -75,6 +76,26 @@ describe("isAlreadyExistsError", () => {
   test("false for unrelated errors", () => {
     expect(isAlreadyExistsError(new Error("missing supporting exact-match index"))).toBe(false);
     expect(isAlreadyExistsError(new Error("Invalid constraint command"))).toBe(false);
+  });
+});
+
+describe("isUnsupportedProcedureError", () => {
+  test("true for 'Unknown procedure'", () => {
+    expect(isUnsupportedProcedureError(new Error("Unknown procedure `db.indexes`"))).toBe(true);
+  });
+
+  test("true for 'Procedure not found'", () => {
+    expect(isUnsupportedProcedureError("Procedure not found: db.constraints")).toBe(true);
+  });
+
+  test("false for connection, authorization, and timeout errors", () => {
+    expect(isUnsupportedProcedureError(new Error("Connection refused"))).toBe(false);
+    expect(isUnsupportedProcedureError(new Error("Permission denied"))).toBe(false);
+    expect(isUnsupportedProcedureError(new Error("Query timed out"))).toBe(false);
+  });
+
+  test("false for benign already-exists duplicates", () => {
+    expect(isUnsupportedProcedureError(new Error("Attribute 'id' is already indexed"))).toBe(false);
   });
 });
 

@@ -114,6 +114,14 @@ export abstract class BaseBoltBackend implements GraphBackend {
   _connected = false;
   /** Whether the schema is known to be present for this connection. */
   private _schemaInitialized = false;
+  /**
+   * In-flight schema initialization promise for this connection. Stored
+   * BEFORE the first awaited database operation so concurrent same-instance
+   * callers share a single DDL run instead of both passing the completed
+   * boolean guard and issuing DDL concurrently. Cleared after the promise
+   * settles and on disconnect.
+   */
+  private _schemaInitPromise: Promise<void> | null = null;
 
   constructor(uri: string, username?: string, password?: string) {
     this.uri = uri;
@@ -173,6 +181,7 @@ export abstract class BaseBoltBackend implements GraphBackend {
     // A later connect() may target a recreated graph, so schema state must
     // not be carried across connections.
     this._schemaInitialized = false;
+    this._schemaInitPromise = null;
     console.log(`${this._display_name} connection closed`);
   }
 
@@ -262,45 +271,62 @@ export abstract class BaseBoltBackend implements GraphBackend {
     if (this._schemaInitialized) {
       return;
     }
-
-    console.log(`Initializing ${this._display_name} schema...`);
-
-    const indexes = [
-      "CREATE INDEX ON :Memory(type)",
-      "CREATE INDEX ON :Memory(created_at)",
-      "CREATE INDEX ON :Memory(importance)",
-      "CREATE INDEX ON :Memory(confidence)",
-    ];
-
-    if (Config.isMultiTenantMode()) {
-      indexes.push(
-        "CREATE INDEX ON :Memory(context_tenant_id)",
-        "CREATE INDEX ON :Memory(context_team_id)",
-        "CREATE INDEX ON :Memory(context_visibility)",
-        "CREATE INDEX ON :Memory(context_created_by)",
-        "CREATE INDEX ON :Memory(version)"
-      );
+    // Single-flight: if another same-instance caller is already initializing
+    // the schema, join that run instead of both passing the completed-guard
+    // above and issuing DDL concurrently.
+    if (this._schemaInitPromise) {
+      return this._schemaInitPromise;
     }
 
-    for (const index of indexes) {
-      try {
-        await this.executeQuery(index, {}, true);
-      } catch (err) {
-        const msg = String(err);
-        if (/already exists|already indexed|EquivalentIndex/i.test(msg)) {
-          continue;
-        }
-        // VAL-REVIEW-020: surface unexpected index failures instead of
-        // swallowing every error (matches the falkordb-shared behavior).
-        console.error(`Failed to create index (${index}): ${err}`);
-        throw new DatabaseConnectionError(
-          `Schema init failed creating index (${index}): ${err}`
+    const init = (async () => {
+      console.log(`Initializing ${this._display_name} schema...`);
+
+      const indexes = [
+        "CREATE INDEX ON :Memory(type)",
+        "CREATE INDEX ON :Memory(created_at)",
+        "CREATE INDEX ON :Memory(importance)",
+        "CREATE INDEX ON :Memory(confidence)",
+      ];
+
+      if (Config.isMultiTenantMode()) {
+        indexes.push(
+          "CREATE INDEX ON :Memory(context_tenant_id)",
+          "CREATE INDEX ON :Memory(context_team_id)",
+          "CREATE INDEX ON :Memory(context_visibility)",
+          "CREATE INDEX ON :Memory(context_created_by)",
+          "CREATE INDEX ON :Memory(version)"
         );
       }
-    }
 
-    console.log("Schema initialization completed");
-    this._schemaInitialized = true;
+      for (const index of indexes) {
+        try {
+          await this.executeQuery(index, {}, true);
+        } catch (err) {
+          const msg = String(err);
+          if (/already exists|already indexed|EquivalentIndex/i.test(msg)) {
+            continue;
+          }
+          // VAL-REVIEW-020: surface unexpected index failures instead of
+          // swallowing every error (matches the falkordb-shared behavior).
+          console.error(`Failed to create index (${index}): ${err}`);
+          throw new DatabaseConnectionError(
+            `Schema init failed creating index (${index}): ${err}`
+          );
+        }
+      }
+
+      console.log("Schema initialization completed");
+      this._schemaInitialized = true;
+    })();
+
+    // Store the in-flight promise before yielding so concurrent callers share
+    // it; clear on settle (both success and failure) so a failure can retry.
+    this._schemaInitPromise = init;
+    try {
+      return await init;
+    } finally {
+      this._schemaInitPromise = null;
+    }
   }
 
   // -----------------------------------------------------------------------

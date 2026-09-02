@@ -54,6 +54,13 @@ export abstract class BaseFalkorDBBackend implements GraphBackend {
   _connected = false;
   /** Whether the schema is known to be present for this connection. */
   private _schemaInitialized = false;
+  /**
+   * In-flight schema initialization promise for this connection. Stored
+   * BEFORE the first awaited database operation so concurrent same-instance
+   * callers share a single DDL run instead of both passing the completed
+   * boolean guard. Cleared after the promise settles and on disconnect.
+   */
+  private _schemaInitPromise: Promise<void> | null = null;
 
   constructor(graphName = "memorygraph") {
     this.graphName = graphName;
@@ -89,6 +96,7 @@ export abstract class BaseFalkorDBBackend implements GraphBackend {
     // A later connect() may target a recreated graph (or a freshly wiped
     // database), so schema state must not be carried across connections.
     this._schemaInitialized = false;
+    this._schemaInitPromise = null;
     console.log(`${this._display_name} connection closed`);
   }
 
@@ -254,6 +262,12 @@ export abstract class BaseFalkorDBBackend implements GraphBackend {
     if (this._schemaInitialized) {
       return;
     }
+    // Single-flight: if another same-instance caller is already initializing
+    // the schema, join that run instead of both passing the completed-guard
+    // above and issuing DDL concurrently.
+    if (this._schemaInitPromise) {
+      return this._schemaInitPromise;
+    }
 
     const indexProps = ["type", "created_at", "importance", "confidence"];
 
@@ -267,83 +281,107 @@ export abstract class BaseFalkorDBBackend implements GraphBackend {
       );
     }
 
-    // If the schema (range index on Memory.id plus the required per-property
-    // indexes and the UNIQUE constraint on id) already exists, the database
-    // was initialized on a previous run. Skip DDL entirely so opening an
-    // existing, populated database is a no-op instead of re-issuing DDL
-    // (which emits noisy "already indexed" logs on every process start).
-    if ((await this.schemaExists(indexProps)) === true) {
-      this._schemaInitialized = true;
-      return;
-    }
+    const init = (async () => {
+      // If the schema (range index on Memory.id plus the required per-property
+      // indexes and the UNIQUE constraint on id) already exists, the database
+      // was initialized on a previous run. Skip DDL entirely so opening an
+      // existing, populated database is a no-op instead of re-issuing DDL
+      // (which emits noisy "already indexed" logs on every process start).
+      if ((await this.schemaExists(indexProps)) === true) {
+        this._schemaInitialized = true;
+        return;
+      }
 
-    console.log(`Initializing ${this._display_name} schema...`);
+      console.log(`Initializing ${this._display_name} schema...`);
 
-    // FalkorDB (client-server and embedded lite) exposes index/constraint
-    // helpers on its Graph object. Creating the schema through these helpers
-    // (rather than raw `CREATE INDEX ON :...` Cypher strings) avoids the
-    // legacy-form incompatibility and lets duplicate creation be caught as a
-    // typed "already exists" error. A genuine failure is still surfaced.
-    if (!this.graph || typeof this.graph.createNodeRangeIndex !== "function") {
-      throw new DatabaseConnectionError(
-        `${this._display_name} graph does not support schema index creation`
-      );
-    }
+      // FalkorDB (client-server and embedded lite) exposes index/constraint
+      // helpers on its Graph object. Creating the schema through these helpers
+      // (rather than raw `CREATE INDEX ON :...` Cypher strings) avoids the
+      // legacy-form incompatibility and lets duplicate creation be caught as a
+      // typed "already exists" error. A genuine failure is still surfaced.
+      if (!this.graph || typeof this.graph.createNodeRangeIndex !== "function") {
+        throw new DatabaseConnectionError(
+          `${this._display_name} graph does not support schema index creation`
+        );
+      }
 
-    // Supporting per-property range indexes. A genuine (non-duplicate) failure
-    // must fail initialization so the schema is not silently marked present
-    // while an index is actually missing.
-    for (const prop of indexProps) {
+      const timeoutMs = Config.QUERY_TIMEOUT;
+
+      // Supporting per-property range indexes. A genuine (non-duplicate) failure
+      // must fail initialization so the schema is not silently marked present
+      // while an index is actually missing. These helper calls bypass
+      // executeQuery(), so wrap them with the same bounded query timeout to
+      // avoid an unbounded hang blocking CLI startup.
+      for (const prop of indexProps) {
+        try {
+          await this._runWithQueryTimeout(
+            () => this.graph.createNodeRangeIndex("Memory", [prop]),
+            timeoutMs
+          );
+        } catch (err) {
+          if (!isAlreadyExistsError(err)) {
+            throw new DatabaseConnectionError(
+              `Failed to create index on Memory(${prop}): ${err}`
+            );
+          }
+        }
+      }
+
+      // UNIQUE constraint requires a supporting (exact-match) range index on
+      // the `id` property; both must exist before the constraint is created.
+      if (typeof this.graph.constraintCreate !== "function") {
+        throw new DatabaseConnectionError(
+          `${this._display_name} graph does not support UNIQUE constraint creation`
+        );
+      }
+
+      // Create the supporting range index and the constraint in separate try
+      // blocks. If the index already exists (e.g. a partial schema was built on
+      // a prior run) the constraint must still be attempted; otherwise a
+      // database that has the index but no constraint would silently accept
+      // duplicate Memory ids. Non-duplicate failures propagate.
       try {
-        await this.graph.createNodeRangeIndex("Memory", [prop]);
+        await this._runWithQueryTimeout(
+          () => this.graph.createNodeRangeIndex("Memory", ["id"]),
+          timeoutMs
+        );
       } catch (err) {
         if (!isAlreadyExistsError(err)) {
           throw new DatabaseConnectionError(
-            `Failed to create index on Memory(${prop}): ${err}`
+            `Failed to create range index on Memory(id): ${err}`
           );
         }
       }
-    }
-
-    // UNIQUE constraint requires a supporting (exact-match) range index on
-    // the `id` property; both must exist before the constraint is created.
-    if (typeof this.graph.constraintCreate !== "function") {
-      throw new DatabaseConnectionError(
-        `${this._display_name} graph does not support UNIQUE constraint creation`
-      );
-    }
-
-    // Create the supporting range index and the constraint in separate try
-    // blocks. If the index already exists (e.g. a partial schema was built on
-    // a prior run) the constraint must still be attempted; otherwise a
-    // database that has the index but no constraint would silently accept
-    // duplicate Memory ids. Non-duplicate failures propagate.
-    try {
-      await this.graph.createNodeRangeIndex("Memory", ["id"]);
-    } catch (err) {
-      if (!isAlreadyExistsError(err)) {
-        throw new DatabaseConnectionError(
-          `Failed to create range index on Memory(id): ${err}`
+      try {
+        await this._runWithQueryTimeout(
+          () => this.graph.constraintCreate("UNIQUE", "NODE", "Memory", "id"),
+          timeoutMs
         );
+      } catch (err) {
+        if (!isAlreadyExistsError(err)) {
+          throw new DatabaseConnectionError(
+            `Failed to create UNIQUE constraint on Memory.id (legacy data may contain duplicate ids): ${err}`
+          );
+        }
       }
-    }
+
+      // Constraint creation may be asynchronous in some servers; poll until the
+      // operational UNIQUE constraint and the required range indexes are visible,
+      // bounded by a short number of attempts.
+      await this.waitForSchema(indexProps);
+
+      console.log("Schema initialization completed");
+      this._schemaInitialized = true;
+    })();
+
+    // Store the in-flight promise before yielding so concurrent callers share
+    // it; clear on settle (both success and failure) so a failure can retry.
+    this._schemaInitPromise = init;
     try {
-      await this.graph.constraintCreate("UNIQUE", "NODE", "Memory", "id");
-    } catch (err) {
-      if (!isAlreadyExistsError(err)) {
-        throw new DatabaseConnectionError(
-          `Failed to create UNIQUE constraint on Memory.id (legacy data may contain duplicate ids): ${err}`
-        );
-      }
+      return await init;
+    } finally {
+      this._schemaInitPromise = null;
     }
-
-    // Constraint creation may be asynchronous in some servers; poll until the
-    // operational UNIQUE constraint and the required range indexes are visible,
-    // bounded by a short number of attempts.
-    await this.waitForSchema(indexProps);
-
-    console.log("Schema initialization completed");
-    this._schemaInitialized = true;
   }
 
   /**
@@ -359,32 +397,38 @@ export abstract class BaseFalkorDBBackend implements GraphBackend {
    *            `call db.constraints()`).
    */
   private async schemaExists(indexProps: string[]): Promise<boolean | null> {
+    let indexResult: Record<string, unknown>[];
+    let constraintResult: Record<string, unknown>[];
     try {
-      const [indexResult, constraintResult] = await Promise.all([
+      [indexResult, constraintResult] = await Promise.all([
         this.executeQuery("call db.indexes()", {}, true),
         this.executeQuery("call db.constraints()", {}, true),
       ]);
-
-      const indexedProps = new Set<string>();
-      for (const row of indexResult ?? []) {
-        if (!isOperationalNodeRow(row)) continue;
-        for (const prop of collectIndexedRangeProps(row)) indexedProps.add(prop);
-      }
-
-      const hasConstraint = operationalMemoryConstraintPresent(
-        constraintResult ?? []
-      );
-
-      const requiredIndexes = ["id", ...indexProps];
-      return (
-        hasConstraint &&
-        requiredIndexes.every((prop) => indexedProps.has(prop))
-      );
-    } catch {
-      // Introspection is not available (e.g. older client or a server without
-      // these procedures); the caller cannot verify the schema.
-      return null;
+    } catch (err) {
+      // Return null ONLY when introspection itself is unavailable (e.g. an
+      // older client or a server that does not implement these procedures),
+      // so waitForSchema() can skip polling on a healthy database. Connection,
+      // authorization, timeout, and other genuine failures must propagate
+      // rather than being mistaken for "introspection unsupported".
+      if (isUnsupportedProcedureError(err)) return null;
+      throw err;
     }
+
+    const indexedProps = new Set<string>();
+    for (const row of indexResult ?? []) {
+      if (!isOperationalNodeRow(row)) continue;
+      for (const prop of collectIndexedRangeProps(row)) indexedProps.add(prop);
+    }
+
+    const hasConstraint = operationalMemoryConstraintPresent(
+      constraintResult ?? []
+    );
+
+    const requiredIndexes = ["id", ...indexProps];
+    return (
+      hasConstraint &&
+      requiredIndexes.every((prop) => indexedProps.has(prop))
+    );
   }
 
   /**
@@ -1126,6 +1170,18 @@ export abstract class BaseFalkorDBBackend implements GraphBackend {
 export function isBenignSchemaError(err: unknown): boolean {
   const message = err instanceof Error ? err.message : String(err);
   return /already (indexed|exists)/i.test(message);
+}
+
+/**
+ * Whether a query error means the introspection procedure itself is
+ * unsupported ("Unknown procedure" / "Procedure not found"), as opposed to a
+ * connection, authorization, timeout, or genuine query failure. `schemaExists`
+ * returns `null` only for this recognized case so waitForSchema() skips polling
+ * on a healthy database; all other errors must propagate.
+ */
+export function isUnsupportedProcedureError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return /unknown procedure|procedure not found/i.test(message);
 }
 
 /**
