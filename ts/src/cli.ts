@@ -8,6 +8,7 @@
 
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { realpathSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 import { Config, TOOL_PROFILES, type BackendType } from "./config.ts";
@@ -1639,22 +1640,35 @@ async function cmdWorkflow(args: string[]): Promise<void> {
 // 1. Direct script run (`node src/cli.ts …` / `bun run src/cli.ts …`):
 //    process.argv[1] is the script path and matches import.meta.url.
 // 2. Bun runtime, including the Bun-compiled binary (`./memorygraph …`):
-//    `Bun.main` is the runtime's authoritative entry-module path. Under Node,
-//    the global `Bun` is undefined so this branch is skipped (the direct-script
-//    check above handles Node). This correctly returns false when cli.ts is
-//    imported as a module (e.g. by tests), which the argv[1] check alone
-//    cannot distinguish from the compiled-binary case.
+//    `Bun.main` is the runtime's authoritative entry-module path.
+//
+// A `.ts` CLI linked into a PATH bin (e.g. `bun link` creating a global
+// symlink in `~/.bun/bin/memorygraph -> …/memorygraph/src/cli.ts`) is invoked
+// with `process.argv[1]` = the SYMLINK path, while `import.meta.url` reflects
+// the RESOLVED realpath. Comparing only `arg1` then misdetects the entry and
+// `main()` never runs, producing an exit 0 with no output. Each candidate is
+// compared both as-is and via `realpathSync`, so a symlinked entry is still
+// recognized. Under Node, the global `Bun` is undefined so the Bun branch is
+// skipped (the argv / realpath checks cover direct + linked scripts).
 const isEntry = (() => {
-  try {
-    const arg1 = process.argv[1];
-    if (arg1 && import.meta.url === pathToFileURL(arg1).href) return true;
-  } catch {
-    // ignore — fall through
-  }
+  const matches = (candidate: string): boolean => {
+    if (import.meta.url === pathToFileURL(candidate).href) return true;
+    try {
+      // Compare against the resolved realpath to handle symlinked entries.
+      const resolved = realpathSync(candidate);
+      return import.meta.url === pathToFileURL(resolved).href;
+    } catch {
+      return false;
+    }
+  };
+
+  const arg1 = process.argv[1];
+  if (arg1 && matches(arg1)) return true;
+
   try {
     const bunGlobal = (globalThis as { Bun?: { main?: string } }).Bun;
     if (bunGlobal && typeof bunGlobal.main === "string") {
-      return import.meta.url === pathToFileURL(bunGlobal.main).href;
+      return matches(bunGlobal.main);
     }
   } catch {
     // ignore — not running under Bun
