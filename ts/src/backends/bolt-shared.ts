@@ -112,6 +112,8 @@ export abstract class BaseBoltBackend implements GraphBackend {
   password?: string;
   driver: any = null;
   _connected = false;
+  /** Whether the schema is known to be present for this connection. */
+  private _schemaInitialized = false;
 
   constructor(uri: string, username?: string, password?: string) {
     this.uri = uri;
@@ -168,6 +170,9 @@ export abstract class BaseBoltBackend implements GraphBackend {
     }
     this.driver = null;
     this._connected = false;
+    // A later connect() may target a recreated graph, so schema state must
+    // not be carried across connections.
+    this._schemaInitialized = false;
     console.log(`${this._display_name} connection closed`);
   }
 
@@ -214,7 +219,10 @@ export abstract class BaseBoltBackend implements GraphBackend {
         );
         throw err;
       }
-      console.error(`Query execution failed: ${err}`);
+      // Schema DDL duplicate errors are benign and handled by the caller.
+      if (!isBenignSchemaError(err)) {
+        console.error(`Query execution failed: ${err}`);
+      }
       throw new DatabaseConnectionError(`Query execution failed: ${err}`);
     } finally {
       await session.close();
@@ -249,6 +257,12 @@ export abstract class BaseBoltBackend implements GraphBackend {
   // -----------------------------------------------------------------------
 
   async initializeSchema(): Promise<void> {
+    // Prevent the double-init seen when createDb() and the factory both call
+    // initializeSchema() on the same backend instance within one process.
+    if (this._schemaInitialized) {
+      return;
+    }
+
     console.log(`Initializing ${this._display_name} schema...`);
 
     const indexes = [
@@ -286,6 +300,7 @@ export abstract class BaseBoltBackend implements GraphBackend {
     }
 
     console.log("Schema initialization completed");
+    this._schemaInitialized = true;
   }
 
   // -----------------------------------------------------------------------
@@ -723,4 +738,15 @@ export abstract class BaseBoltBackend implements GraphBackend {
       throw new DatabaseConnectionError(`Failed to get relationships since: ${err}`);
     }
   }
+}
+
+/**
+ * Whether a query error is the benign "already indexed" / "already exists"
+ * / "Equivalent index" DDL duplicate seen during schema init on repeated
+ * runs. `executeQuery()` uses this to decide whether to log the failure at
+ * its own level; the caller handles it.
+ */
+export function isBenignSchemaError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return /already (indexed|exists)|Equivalent index/i.test(message);
 }

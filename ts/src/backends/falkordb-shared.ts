@@ -16,6 +16,8 @@ import {
   type SearchQuery,
   memoryToNodeProperties,
   createRelationshipProperties,
+  clearedMemoryProperties,
+  toIso,
   ALL_RELATIONSHIP_TYPES,
 } from "../models.ts";
 import {
@@ -50,6 +52,8 @@ export abstract class BaseFalkorDBBackend implements GraphBackend {
   client: any = null;
   graph: any = null;
   _connected = false;
+  /** Whether the schema is known to be present for this connection. */
+  private _schemaInitialized = false;
 
   constructor(graphName = "memorygraph") {
     this.graphName = graphName;
@@ -82,6 +86,9 @@ export abstract class BaseFalkorDBBackend implements GraphBackend {
     this.client = null;
     this.graph = null;
     this._connected = false;
+    // A later connect() may target a recreated graph (or a freshly wiped
+    // database), so schema state must not be carried across connections.
+    this._schemaInitialized = false;
     console.log(`${this._display_name} connection closed`);
   }
 
@@ -117,7 +124,14 @@ export abstract class BaseFalkorDBBackend implements GraphBackend {
         );
         throw err;
       }
-      console.error(`Query execution failed: ${err}`);
+      // Schema DDL (CREATE INDEX / CONSTRAINT) is idempotent from the
+      // caller's perspective: duplicate creation raises "already indexed" /
+      // "already exists" on repeated runs, which initializeSchema() treats as
+      // benign. Don't print these as errors at the source — the caller decides
+      // whether to log or suppress them. All other failures are genuine.
+      if (!isBenignSchemaError(err)) {
+        console.error(`Query execution failed: ${err}`);
+      }
       throw new DatabaseConnectionError(`Query execution failed: ${err}`);
     }
   }
@@ -193,9 +207,38 @@ export abstract class BaseFalkorDBBackend implements GraphBackend {
   }
 
   private convertFalkorDBValue(value: any): any {
-    if (value && typeof value === "object" && "properties" in value) {
-      // FalkorDB node/relationship: flatten to its property dict.
-      return { ...value.properties };
+    // Handle arrays BEFORE the object guard so nested node values inside
+    // returned arrays are converted too (the array branch is unreachable if
+    // it is placed after the `!Array.isArray(value)` object check).
+    if (Array.isArray(value)) {
+      return value.map((v) => this.convertFalkorDBValue(v));
+    }
+    if (value && typeof value === "object" && !Array.isArray(value)) {
+      // FalkorDB node/relationship: flatten to its property dict. Only
+      // unwrap a genuine node shape (identified by the `labels` marker and a
+      // non-null, non-array `properties` map) so a result row that merely has
+      // a column named `properties` does not collapse the whole row into it,
+      // and a `properties: null` / array value is not mis-unwrapped.
+      if (
+        Array.isArray(value["labels"]) &&
+        "properties" in value &&
+        value["properties"] !== null &&
+        typeof value["properties"] === "object" &&
+        !Array.isArray(value["properties"])
+      ) {
+        return { ...value.properties };
+      }
+      // Recurse into plain-object values so nested maps/columns are converted.
+      if (!(value instanceof Date)) {
+        const out: Record<string, unknown> = {};
+        let changed = false;
+        for (const [k, v] of Object.entries(value)) {
+          const converted = this.convertFalkorDBValue(v);
+          if (converted !== v) changed = true;
+          out[k] = converted;
+        }
+        return changed ? out : value;
+      }
     }
     return value;
   }
@@ -205,82 +248,165 @@ export abstract class BaseFalkorDBBackend implements GraphBackend {
   // -----------------------------------------------------------------------
 
   async initializeSchema(): Promise<void> {
-    console.log(`Initializing ${this._display_name} schema...`);
+    // Once verified, never re-run DDL on this connection. This also prevents
+    // the double-init seen when createDb() and the factory factory both call
+    // initializeSchema() on the same backend instance within one process.
+    if (this._schemaInitialized) {
+      return;
+    }
 
-    // FalkorDB v4.16.3 requires the `GRAPH.CONSTRAINT` command form (not
-    // legacy `CREATE CONSTRAINT ...`). The legacy form errors with
-    // "Invalid constraint command use the GRAPH.CONSTRAINT command instead".
-    //
-    // FalkorDB also requires a supporting exact-match index to exist on the
-    // property BEFORE a UNIQUE constraint is created (otherwise the
-    // constraint call errors with "missing supporting exact-match index").
-    // So we create the indexes first, then the constraint.
-    //
-    // We never swallow errors silently — a schema-init failure that isn't
-    // the "already exists" case is logged and propagated.
-
-    const indexes = [
-      "CREATE INDEX ON :Memory(id)",
-      "CREATE INDEX ON :Memory(type)",
-      "CREATE INDEX ON :Memory(created_at)",
-      "CREATE INDEX ON :Memory(importance)",
-      "CREATE INDEX ON :Memory(confidence)",
-    ];
+    const indexProps = ["type", "created_at", "importance", "confidence"];
 
     if (Config.isMultiTenantMode()) {
-      indexes.push(
-        "CREATE INDEX ON :Memory(context_tenant_id)",
-        "CREATE INDEX ON :Memory(context_team_id)",
-        "CREATE INDEX ON :Memory(context_visibility)",
-        "CREATE INDEX ON :Memory(context_created_by)",
-        "CREATE INDEX ON :Memory(version)"
+      indexProps.push(
+        "context_tenant_id",
+        "context_team_id",
+        "context_visibility",
+        "context_created_by",
+        "version"
       );
     }
 
-    for (const index of indexes) {
+    // If the schema (range index on Memory.id plus the required per-property
+    // indexes and the UNIQUE constraint on id) already exists, the database
+    // was initialized on a previous run. Skip DDL entirely so opening an
+    // existing, populated database is a no-op instead of re-issuing DDL
+    // (which emits noisy "already indexed" logs on every process start).
+    if ((await this.schemaExists(indexProps)) === true) {
+      this._schemaInitialized = true;
+      return;
+    }
+
+    console.log(`Initializing ${this._display_name} schema...`);
+
+    // FalkorDB (client-server and embedded lite) exposes index/constraint
+    // helpers on its Graph object. Creating the schema through these helpers
+    // (rather than raw `CREATE INDEX ON :...` Cypher strings) avoids the
+    // legacy-form incompatibility and lets duplicate creation be caught as a
+    // typed "already exists" error. A genuine failure is still surfaced.
+    if (!this.graph || typeof this.graph.createNodeRangeIndex !== "function") {
+      throw new DatabaseConnectionError(
+        `${this._display_name} graph does not support schema index creation`
+      );
+    }
+
+    // Supporting per-property range indexes. A genuine (non-duplicate) failure
+    // must fail initialization so the schema is not silently marked present
+    // while an index is actually missing.
+    for (const prop of indexProps) {
       try {
-        await this.executeQuery(index, {}, true);
+        await this.graph.createNodeRangeIndex("Memory", [prop]);
       } catch (err) {
-        const msg = String(err);
-        if (/already exists|already indexed/i.test(msg)) {
-          // Index already exists — benign, continue.
-          continue;
+        if (!isAlreadyExistsError(err)) {
+          throw new DatabaseConnectionError(
+            `Failed to create index on Memory(${prop}): ${err}`
+          );
         }
-        // Surface (do not swallow) unexpected index failures.
-        console.error(`Failed to create index (${index}): ${err}`);
+      }
+    }
+
+    // UNIQUE constraint requires a supporting (exact-match) range index on
+    // the `id` property; both must exist before the constraint is created.
+    if (typeof this.graph.constraintCreate !== "function") {
+      throw new DatabaseConnectionError(
+        `${this._display_name} graph does not support UNIQUE constraint creation`
+      );
+    }
+
+    // Create the supporting range index and the constraint in separate try
+    // blocks. If the index already exists (e.g. a partial schema was built on
+    // a prior run) the constraint must still be attempted; otherwise a
+    // database that has the index but no constraint would silently accept
+    // duplicate Memory ids. Non-duplicate failures propagate.
+    try {
+      await this.graph.createNodeRangeIndex("Memory", ["id"]);
+    } catch (err) {
+      if (!isAlreadyExistsError(err)) {
         throw new DatabaseConnectionError(
-          `Schema init failed creating index (${index}): ${err}`
+          `Failed to create range index on Memory(id): ${err}`
+        );
+      }
+    }
+    try {
+      await this.graph.constraintCreate("UNIQUE", "NODE", "Memory", "id");
+    } catch (err) {
+      if (!isAlreadyExistsError(err)) {
+        throw new DatabaseConnectionError(
+          `Failed to create UNIQUE constraint on Memory.id (legacy data may contain duplicate ids): ${err}`
         );
       }
     }
 
-    // Now create the unique constraint on :Memory.id, using the v4.16.3
-    // GRAPH.CONSTRAINT command form. Prefer the SDK helper when available.
-    const constraintDesc = "unique constraint on :Memory.id";
-    try {
-      if (this.graph && typeof this.graph.constraintCreate === "function") {
-        // constraintCreate(type, entityType, label, ...properties)
-        await this.graph.constraintCreate("UNIQUE", "NODE", "Memory", "id");
-      } else {
-        await this.executeQuery(
-          "GRAPH.CONSTRAINT CREATE memorygraph UNIQUE NODE Memory PROPERTIES 1 id",
-          {},
-          true
-        );
-      }
-    } catch (err) {
-      const msg = String(err);
-      if (/already exists/i.test(msg)) {
-        console.log(`Constraint already exists (${constraintDesc}); skipping.`);
-      } else {
-        console.error(`Failed to create constraint (${constraintDesc}): ${err}`);
-        throw new DatabaseConnectionError(
-          `Schema init failed creating constraint (${constraintDesc}): ${err}`
-        );
-      }
-    }
+    // Constraint creation may be asynchronous in some servers; poll until the
+    // operational UNIQUE constraint and the required range indexes are visible,
+    // bounded by a short number of attempts.
+    await this.waitForSchema(indexProps);
 
     console.log("Schema initialization completed");
+    this._schemaInitialized = true;
+  }
+
+  /**
+   * Whether the operational `Memory` schema (per-property range indexes plus
+   * the UNIQUE constraint on `id`) already exists in the graph. Used to skip
+   * DDL on startup when an existing, populated database is opened.
+   *
+   * Returns:
+   *  - `true`  when the required schema is verified operational,
+   *  - `false` when the schema is verifiable but not yet complete,
+   *  - `null`  when introspection itself is not available (the driver or
+   *            server does not implement `call db.indexes()` /
+   *            `call db.constraints()`).
+   */
+  private async schemaExists(indexProps: string[]): Promise<boolean | null> {
+    try {
+      const [indexResult, constraintResult] = await Promise.all([
+        this.executeQuery("call db.indexes()", {}, true),
+        this.executeQuery("call db.constraints()", {}, true),
+      ]);
+
+      const indexedProps = new Set<string>();
+      for (const row of indexResult ?? []) {
+        if (!isOperationalNodeRow(row)) continue;
+        for (const prop of collectIndexedRangeProps(row)) indexedProps.add(prop);
+      }
+
+      const hasConstraint = operationalMemoryConstraintPresent(
+        constraintResult ?? []
+      );
+
+      const requiredIndexes = ["id", ...indexProps];
+      return (
+        hasConstraint &&
+        requiredIndexes.every((prop) => indexedProps.has(prop))
+      );
+    } catch {
+      // Introspection is not available (e.g. older client or a server without
+      // these procedures); the caller cannot verify the schema.
+      return null;
+    }
+  }
+
+  /**
+   * Poll introspection until the operational `Memory` schema (required range
+   * indexes plus the UNIQUE constraint on `id`) is visible. Constraint/index
+   * creation can be asynchronous on some servers; this gives it a bounded time
+   * to become OPERATIONAL rather than declaring success immediately.
+   *
+   * When introspection is unsupported the DDL has already succeeded, so the
+   * wait is skipped rather than failing initialization on a healthy database.
+   */
+  private async waitForSchema(indexProps: string[]): Promise<void> {
+    const attempts = 10;
+    for (let i = 0; i < attempts; i++) {
+      const state = await this.schemaExists(indexProps);
+      // Introspection unsupported (null) or schema verified (true): accept it.
+      if (state === null || state === true) return;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    throw new DatabaseConnectionError(
+      `Schema initialization did not become OPERATIONAL after ${attempts} attempts for ${this._display_name}`
+    );
   }
 
   // -----------------------------------------------------------------------
@@ -428,6 +554,19 @@ export abstract class BaseFalkorDBBackend implements GraphBackend {
       memory.updated_at = now;
 
       const properties = memoryToNodeProperties(memory);
+      const cleared = clearedMemoryProperties(memory);
+
+      // Cleared optional fields (summary, effectiveness, last_accessed,
+      // updated_by, context_summary, and null context subfields) are omitted
+      // by memoryToNodeProperties, so `SET m += $properties` would leave stale
+      // values on the node. REMOVE them explicitly. Keys come from a schema
+      // whitelist, but filter again so no non-identifier text is ever
+      // interpolated into the Cypher string (defense in depth, SEC-11).
+      const removable = cleared.filter((k) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(k));
+      const removeClause =
+        removable.length > 0
+          ? `REMOVE ${removable.map((k) => `m.${k}`).join(", ")}`
+          : "";
 
       // H7 (VAL-LOCAL-017..019): minimal memory versioning. Before
       // overwriting the memory, snapshot the CURRENT (pre-update) state
@@ -456,6 +595,7 @@ export abstract class BaseFalkorDBBackend implements GraphBackend {
         SET m += $properties,
             m.updated_at = $now,
             m.version = coalesce(m.version, 1) + 1
+        ${removeClause}
         RETURN m.id as id
       `;
       const result = await this.executeQuery(
@@ -977,6 +1117,89 @@ export abstract class BaseFalkorDBBackend implements GraphBackend {
   }
 }
 
-function toIso(value: string | Date): string {
-  return value instanceof Date ? value.toISOString() : value;
+/**
+ * Whether a query error is the benign "already indexed" / "already exists"`
+ * DDL duplicate seen during schema init on repeated runs. These are expected
+ * and handled by `initializeSchema()`; `executeQuery()` uses this to decide
+ * whether to log the failure at its own level.
+ */
+export function isBenignSchemaError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return /already (indexed|exists)/i.test(message);
+}
+
+/**
+ * Whether a schema-init error means the index/constraint already exists
+ * (expected on repeated runs) rather than a genuine failure.
+ */
+export function isAlreadyExistsError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return /already (indexed|exists)/i.test(message);
+}
+
+/**
+ * Whether a schema row from `call db.indexes()` / `call db.constraints()`
+ * describes an operational node (Memory) index or constraint.
+ */
+export function isOperationalNodeRow(row: Record<string, unknown>): boolean {
+  const entityType = row["entitytype"] ?? row["entityType"];
+  return (
+    row["label"] === "Memory" &&
+    String(entityType ?? "").toUpperCase() === "NODE" &&
+    String(row["status"] ?? "").toUpperCase() === "OPERATIONAL"
+  );
+}
+
+/**
+ * Collect the RANGE-indexed property names from a schema index row.
+ *
+ * A FalkorDB index row carries the indexed properties in `properties` (a list)
+ * and their index types in `types` (a map of property → list of index kinds).
+ * Only properties that have a `RANGE` entry are treated as covered by a range
+ * index, so a full-text or vector index cannot satisfy a required range-index
+ * property. Drivers that omit `types` (older servers) fall back to the
+ * `properties` list.
+ */
+export function collectIndexedRangeProps(row: Record<string, unknown>): string[] {
+  const rawProps = row["properties"];
+  const rawTypes = row["types"];
+
+  const props: string[] = [];
+
+  if (rawTypes && typeof rawTypes === "object" && !Array.isArray(rawTypes)) {
+    for (const [key, kinds] of Object.entries(rawTypes as Record<string, unknown>)) {
+      const list = Array.isArray(kinds) ? kinds : [kinds];
+      if (list.some((k) => String(k).toUpperCase() === "RANGE" || String(k).toUpperCase() === "RANGE_VALUE")) {
+        props.push(key);
+      }
+    }
+    return props;
+  }
+
+  // Fallback: no `types` metadata – assume the properties list is range-indexed.
+  if (Array.isArray(rawProps)) {
+    for (const p of rawProps) {
+      if (typeof p === "string") props.push(p);
+    }
+  }
+
+  return props;
+}
+
+/**
+ * Whether any row in the `call db.constraints()` result is the operational
+ * `UNIQUE` constraint on `Memory.id`.
+ */
+export function operationalMemoryConstraintPresent(
+  rows: Record<string, unknown>[]
+): boolean {
+  for (const row of rows ?? []) {
+    if (!isOperationalNodeRow(row)) continue;
+    if (String(row["type"] ?? "").toUpperCase() !== "UNIQUE") continue;
+    const rawProps = row["properties"];
+    if (Array.isArray(rawProps) && rawProps.includes("id")) return true;
+    // Driver may expose the property positionally (e.g. integer-keyed rows).
+    if (Object.values(row).some((v) => v === "id")) return true;
+  }
+  return false;
 }
