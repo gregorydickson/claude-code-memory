@@ -507,7 +507,7 @@ export class SQLiteBackend implements GraphBackend {
           const ftsRows = this.db.prepare(ftsSql).all(...boundFts) as Record<string, unknown>[];
 
           if (ftsRows.length > 0) {
-            return ftsRows.map(rowToMemory);
+            return ftsRows.map(rowToMemory).filter((m): m is Memory => m !== null);
           }
         } catch {
           // Fallback to tokenized LIKE search below
@@ -752,7 +752,7 @@ export class SQLiteBackend implements GraphBackend {
     }
 
     const relationshipId = randomUUID();
-    const props = properties ?? createRelationshipProperties();
+    const props = createRelationshipProperties(properties);
 
     // Check both memories exist
     const fromExists = this.db.prepare("SELECT id FROM memories WHERE id = ?").get(fromMemoryId);
@@ -818,27 +818,26 @@ export class SQLiteBackend implements GraphBackend {
         relParams.push(...relTypes);
       }
 
-      // Single-query recursive BFS traversal in SQLite C engine
+      // Single-query recursive BFS traversal in SQLite C engine with cycle tracking
       const sql = `
-        WITH RECURSIVE traverse(mem_id, rel_id, depth) AS (
+        WITH RECURSIVE traverse(mem_id, rel_id, depth, path) AS (
           SELECT
-            CASE WHEN r.from_id = ? THEN r.to_id ELSE r.from_id END AS mem_id,
-            r.id AS rel_id,
-            1 AS depth
-          FROM relationships r
-          WHERE (r.from_id = ? OR r.to_id = ?)
-            ${relTypeFilter}
+            CAST(? AS TEXT) AS mem_id,
+            CAST(NULL AS TEXT) AS rel_id,
+            0 AS depth,
+            ',' || ? || ',' AS path
 
           UNION
 
           SELECT
             CASE WHEN r.from_id = t.mem_id THEN r.to_id ELSE r.from_id END AS mem_id,
             r.id AS rel_id,
-            t.depth + 1 AS depth
+            t.depth + 1 AS depth,
+            t.path || (CASE WHEN r.from_id = t.mem_id THEN r.to_id ELSE r.from_id END) || ',' AS path
           FROM relationships r
           JOIN traverse t ON (r.from_id = t.mem_id OR r.to_id = t.mem_id)
           WHERE t.depth < ?
-            AND CASE WHEN r.from_id = t.mem_id THEN r.to_id ELSE r.from_id END != ?
+            AND instr(t.path, ',' || (CASE WHEN r.from_id = t.mem_id THEN r.to_id ELSE r.from_id END) || ',') = 0
             ${relTypeFilter}
         )
         SELECT DISTINCT
@@ -851,12 +850,12 @@ export class SQLiteBackend implements GraphBackend {
         FROM traverse t
         JOIN relationships r ON r.id = t.rel_id
         JOIN memories m ON m.id = t.mem_id
+        WHERE t.depth > 0
         ORDER BY t.depth ASC, r.strength DESC;
       `;
 
       const queryParams = [
-        memoryId, memoryId, memoryId, ...relParams,
-        maxDepth, memoryId, ...relParams,
+        memoryId, memoryId, maxDepth, ...relParams,
       ];
 
       const rows = this.db.prepare(sql).all(...(queryParams as any[])) as Record<string, unknown>[];
@@ -871,7 +870,7 @@ export class SQLiteBackend implements GraphBackend {
         const mem = rowToMemory(row);
         const props = createRelationshipProperties({
           strength: Number(row["strength"] ?? 0.5),
-          confidence: Number(row["confidence"] ?? 0.8),
+          confidence: Number(row["r_confidence"] ?? 0.8),
           context: (row["r_context"] as string) ?? undefined,
           evidence_count: Number(row["evidence_count"] ?? 1),
           valid_from: row["valid_from"] as string,

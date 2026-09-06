@@ -605,4 +605,40 @@ describe("SQLiteBackend search matching", () => {
     expect(titles).toContain("Intermediate Solution");
     expect(titles).toContain("Deep Fix");
   });
+
+  test("getRelatedMemories handles dense cyclic graphs with maxDepth > 2 without path explosion", async () => {
+    // Construct a cycle: A -> B -> C -> D -> B
+    const a = await db.storeMemory(createMemory({ type: "problem", title: "Node A", content: "A" }));
+    const b = await db.storeMemory(createMemory({ type: "solution", title: "Node B", content: "B" }));
+    const c = await db.storeMemory(createMemory({ type: "solution", title: "Node C", content: "C" }));
+    const d = await db.storeMemory(createMemory({ type: "solution", title: "Node D", content: "D" }));
+
+    await db.createRelationship(a, b, "SOLVES");
+    await db.createRelationship(b, c, "BUILDS_ON");
+    await db.createRelationship(c, d, "REQUIRES");
+    await db.createRelationship(d, b, "SOLVES"); // cycle back to B
+
+    const related = await db.getRelatedMemories(a, { maxDepth: 4 });
+    // Expected to reach B, C, D without duplicates or infinite loop
+    expect(related.length).toBe(3);
+    const relatedTitles = related.map((r) => r[0].title);
+    expect(relatedTitles).toContain("Node B");
+    expect(relatedTitles).toContain("Node C");
+    expect(relatedTitles).toContain("Node D");
+  });
+
+  test("getRelatedMemories preserves relationship confidence distinct from target memory confidence", async () => {
+    const p = await db.storeMemory(createMemory({ type: "problem", title: "Base Problem", content: "P", confidence: 0.95 }));
+    const s = await db.storeMemory(createMemory({ type: "solution", title: "Specific Solution", content: "S", confidence: 0.95 }));
+
+    // Relationship has distinct lower confidence (0.35)
+    await db.createRelationship(s, p, "SOLVES", { confidence: 0.35, strength: 0.8 });
+
+    const related = await db.getRelatedMemories(p, { maxDepth: 1 });
+    expect(related.length).toBe(1);
+    const [mem, rel] = related[0];
+    expect(mem.title).toBe("Specific Solution");
+    expect(mem.confidence).toBe(0.95);
+    expect(rel.properties.confidence).toBe(0.35);
+  });
 });
