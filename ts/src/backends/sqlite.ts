@@ -107,6 +107,11 @@ export class SQLiteBackend implements GraphBackend {
       this.db = await openSqliteDatabase(this.dbPath);
       this.db.exec("PRAGMA journal_mode=WAL;");
       this.db.exec("PRAGMA foreign_keys=ON;");
+      const syncMode = (process.env["MEMORY_SQLITE_SYNCHRONOUS"] ?? "NORMAL").toUpperCase();
+      const safeSyncMode = ["OFF", "NORMAL", "FULL", "EXTRA"].includes(syncMode) ? syncMode : "NORMAL";
+      this.db.exec(`PRAGMA synchronous=${safeSyncMode};`);
+      this.db.exec("PRAGMA temp_store=MEMORY;");
+      this.db.exec("PRAGMA mmap_size=67108864;");
       this._connected = true;
       console.log(`Successfully connected to SQLite database at ${this.dbPath}`);
       return true;
@@ -190,6 +195,43 @@ export class SQLiteBackend implements GraphBackend {
       CREATE INDEX IF NOT EXISTS idx_relationships_from ON relationships(from_id);
       CREATE INDEX IF NOT EXISTS idx_relationships_to ON relationships(to_id);
       CREATE INDEX IF NOT EXISTS idx_relationships_type ON relationships(rel_type);
+
+      -- Full-Text Search (FTS5) with Porter stemming and unicode support
+      CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
+        id UNINDEXED,
+        title,
+        content,
+        summary,
+        tags,
+        tokenize = 'porter unicode61'
+      );
+
+      -- Triggers keeping FTS index in lockstep with memories table
+      CREATE TRIGGER IF NOT EXISTS trg_memories_ai AFTER INSERT ON memories BEGIN
+        INSERT INTO memories_fts(id, title, content, summary, tags)
+        VALUES (new.id, new.title, new.content, COALESCE(new.summary, ''), new.tags);
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS trg_memories_au AFTER UPDATE ON memories
+      WHEN old.title IS NOT new.title
+        OR old.content IS NOT new.content
+        OR old.summary IS NOT new.summary
+        OR old.tags IS NOT new.tags
+      BEGIN
+        DELETE FROM memories_fts WHERE id = old.id;
+        INSERT INTO memories_fts(id, title, content, summary, tags)
+        VALUES (new.id, new.title, new.content, COALESCE(new.summary, ''), new.tags);
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS trg_memories_ad AFTER DELETE ON memories BEGIN
+        DELETE FROM memories_fts WHERE id = old.id;
+      END;
+
+      -- Backfill FTS for any pre-existing rows
+      INSERT INTO memories_fts(id, title, content, summary, tags)
+      SELECT m.id, m.title, m.content, COALESCE(m.summary, ''), m.tags
+      FROM memories m
+      WHERE NOT EXISTS (SELECT 1 FROM memories_fts f WHERE f.id = m.id);
     `);
 
     console.log("SQLite schema initialization completed");
@@ -226,7 +268,7 @@ export class SQLiteBackend implements GraphBackend {
     return "sqlite";
   }
   supportsFulltextSearch(): boolean {
-    return false;
+    return true;
   }
   supportsTransactions(): boolean {
     return true;
@@ -239,8 +281,11 @@ export class SQLiteBackend implements GraphBackend {
 
   async storeMemory(memory: Memory): Promise<string> {
     if (!this.db) throw new DatabaseConnectionError("Not connected");
+    const now = new Date().toISOString();
     if (!memory.id) memory.id = randomUUID();
-    memory.updated_at = new Date().toISOString();
+    const createdAt = memory.created_at ? toIso(memory.created_at) : now;
+    const updatedAt = memory.updated_at ? toIso(memory.updated_at) : now;
+    memory.updated_at = updatedAt;
 
     const contextJson = memory.context ? JSON.stringify(memory.context) : null;
 
@@ -280,15 +325,15 @@ export class SQLiteBackend implements GraphBackend {
           memory.title,
           memory.content,
           memory.summary ?? null,
-          JSON.stringify(memory.tags),
-          memory.importance,
-          memory.confidence,
+          JSON.stringify(Array.isArray(memory.tags) ? memory.tags : []),
+          typeof memory.importance === "number" ? memory.importance : 0.5,
+          typeof memory.confidence === "number" ? memory.confidence : 0.8,
           memory.effectiveness ?? null,
-          memory.usage_count,
-          toIso(memory.created_at),
-          toIso(memory.updated_at),
+          typeof memory.usage_count === "number" ? memory.usage_count : 0,
+          createdAt,
+          updatedAt,
           memory.last_accessed ? toIso(memory.last_accessed) : null,
-          memory.version,
+          typeof memory.version === "number" ? memory.version : 1,
           memory.updated_by ?? null,
           contextJson
         );
@@ -298,6 +343,79 @@ export class SQLiteBackend implements GraphBackend {
     } catch (err) {
       console.error(`Failed to store memory: ${err}`);
       throw new DatabaseConnectionError(`Failed to store memory: ${err}`);
+    }
+  }
+
+  /**
+   * High-throughput batch ingestion using SQLite prepared statements inside a single transaction.
+   */
+  async bulkStoreMemories(memories: Memory[]): Promise<string[]> {
+    if (!this.db) throw new DatabaseConnectionError("Not connected");
+    if (memories.length === 0) return [];
+
+    const ids: string[] = [];
+    const now = new Date().toISOString();
+
+    const insertStmt = this.db.prepare(
+      `INSERT INTO memories
+       (id, type, title, content, summary, tags, importance, confidence, effectiveness,
+        usage_count, created_at, updated_at, last_accessed, version, updated_by, context)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET
+         type = excluded.type,
+         title = excluded.title,
+         content = excluded.content,
+         summary = excluded.summary,
+         tags = excluded.tags,
+         importance = excluded.importance,
+         confidence = excluded.confidence,
+         effectiveness = excluded.effectiveness,
+         usage_count = excluded.usage_count,
+         updated_at = excluded.updated_at,
+         last_accessed = excluded.last_accessed,
+         version = excluded.version,
+         updated_by = excluded.updated_by,
+         context = excluded.context`
+    );
+
+    try {
+      this.db.exec("BEGIN TRANSACTION;");
+      for (const memory of memories) {
+        const memId = memory.id || randomUUID();
+        memory.id = memId;
+        const createdAt = memory.created_at ? toIso(memory.created_at) : now;
+        const updatedAt = memory.updated_at ? toIso(memory.updated_at) : now;
+        memory.updated_at = updatedAt;
+        ids.push(memId);
+
+        const contextJson = memory.context ? JSON.stringify(memory.context) : null;
+        insertStmt.run(
+          memId,
+          memory.type,
+          memory.title,
+          memory.content,
+          memory.summary ?? null,
+          JSON.stringify(Array.isArray(memory.tags) ? memory.tags : []),
+          typeof memory.importance === "number" ? memory.importance : 0.5,
+          typeof memory.confidence === "number" ? memory.confidence : 0.8,
+          memory.effectiveness ?? null,
+          typeof memory.usage_count === "number" ? memory.usage_count : 0,
+          createdAt,
+          updatedAt,
+          memory.last_accessed ? toIso(memory.last_accessed) : null,
+          typeof memory.version === "number" ? memory.version : 1,
+          memory.updated_by ?? null,
+          contextJson
+        );
+      }
+      this.db.exec("COMMIT;");
+      return ids;
+    } catch (err) {
+      try {
+        this.db.exec("ROLLBACK;");
+      } catch {}
+      console.error(`Failed to bulk store memories: ${err}`);
+      throw new DatabaseConnectionError(`Failed to bulk store memories: ${err}`);
     }
   }
 
@@ -313,6 +431,103 @@ export class SQLiteBackend implements GraphBackend {
   async searchMemories(searchQuery: SearchQuery): Promise<Memory[]> {
     if (!this.db) throw new DatabaseConnectionError("Not connected");
 
+    // 1. High-Performance FTS5 Search Path (with Porter stemming and BM25 ranking)
+    // Used when a text query is present without explicit override terms.
+    if (searchQuery.query && (!searchQuery.terms || searchQuery.terms.length === 0)) {
+      const tokens = tokenizeSearchQuery(searchQuery.query);
+      if (tokens.length > 0) {
+        try {
+          const ftsConditions: string[] = [];
+          const ftsParams: unknown[] = [];
+
+          const joiner = searchQuery.match_mode === "all" ? " AND " : " OR ";
+          const ftsMatch = tokens.map((w) => `"${w.replace(/"/g, '""')}"*`).join(joiner);
+
+          ftsConditions.push("memories_fts MATCH ?");
+          ftsParams.push(ftsMatch);
+
+          if (searchQuery.memory_types.length > 0) {
+            const placeholders = searchQuery.memory_types.map(() => "?").join(",");
+            ftsConditions.push(`m.type IN (${placeholders})`);
+            ftsParams.push(...searchQuery.memory_types);
+          }
+
+          if (searchQuery.tags.length > 0) {
+            const tagConditions = searchQuery.tags.map(() => "m.tags LIKE ? ESCAPE '\\'").join(" OR ");
+            ftsConditions.push(`(${tagConditions})`);
+            for (const tag of searchQuery.tags) {
+              ftsParams.push(`%"${escapeLikeLiteral(tag)}"%`);
+            }
+          }
+
+          if (searchQuery.project_path) {
+            ftsConditions.push("json_extract(m.context, '$.project_path') = ?");
+            ftsParams.push(searchQuery.project_path);
+          }
+
+          if (searchQuery.min_importance !== undefined && searchQuery.min_importance !== null) {
+            ftsConditions.push("m.importance >= ?");
+            ftsParams.push(searchQuery.min_importance);
+          }
+
+          if (searchQuery.min_confidence !== undefined && searchQuery.min_confidence !== null) {
+            ftsConditions.push("m.confidence >= ?");
+            ftsParams.push(searchQuery.min_confidence);
+          }
+
+          if (searchQuery.min_effectiveness !== undefined && searchQuery.min_effectiveness !== null) {
+            ftsConditions.push("m.effectiveness >= ?");
+            ftsParams.push(searchQuery.min_effectiveness);
+          }
+
+          if (searchQuery.created_after) {
+            ftsConditions.push("m.created_at >= ?");
+            ftsParams.push(
+              searchQuery.created_after instanceof Date
+                ? searchQuery.created_after.toISOString()
+                : searchQuery.created_after
+            );
+          }
+
+          if (searchQuery.created_before) {
+            ftsConditions.push("m.created_at <= ?");
+            ftsParams.push(
+              searchQuery.created_before instanceof Date
+                ? searchQuery.created_before.toISOString()
+                : searchQuery.created_before
+            );
+          }
+
+          const ftsWhere = ftsConditions.join(" AND ");
+          // Weights for memories_fts columns: id (unindexed), title, content, summary, tags
+          // Graph-aware reranking: proportional boost (1.25x) for authoritative nodes with active relationships
+          const ftsSql = `
+            SELECT m.*,
+                   (bm25(memories_fts, 0.0, 10.0, 1.0, 2.0, 3.0) * (
+                     CASE WHEN EXISTS (
+                       SELECT 1 FROM relationships r
+                       WHERE (r.from_id = m.id OR r.to_id = m.id)
+                         AND (r.rel_type IN ('SOLVES', 'BUILDS_ON', 'REQUIRES', 'PREVENTS') OR r.strength >= 0.7)
+                     ) THEN 1.25 ELSE 1.0 END
+                   )) AS fts_score
+            FROM memories_fts f
+            JOIN memories m ON m.id = f.id
+            WHERE ${ftsWhere}
+            ORDER BY fts_score ASC, m.importance DESC, m.created_at DESC
+            LIMIT ? OFFSET ?
+          `;
+
+          const boundFts = [...ftsParams, searchQuery.limit, searchQuery.offset ?? 0];
+          const ftsRows = this.db.prepare(ftsSql).all(...boundFts) as Record<string, unknown>[];
+
+          return ftsRows.map(rowToMemory).filter((m): m is Memory => m !== null);
+        } catch {
+          // Fallback to tokenized LIKE search below on FTS syntax or query execution failure
+        }
+      }
+    }
+
+    // 2. Tokenized LIKE search fallback
     const conditions: string[] = [];
     const params: unknown[] = [];
 
@@ -443,10 +658,20 @@ export class SQLiteBackend implements GraphBackend {
       searchQuery.offset ?? 0,
     ];
 
+    // Rank memories by combining lexical relevance score (title/content/summary/tags)
+    // with a graph connectivity boost (+1.0) when the memory participates in critical
+    // causal or high-strength semantic relationships (SOLVES, BUILDS_ON, REQUIRES, PREVENTS).
+    // Break ties by inherent importance, then recency.
     const rows = this.db
       .prepare(
         `SELECT * FROM (
-           SELECT *, ${relevanceSql} AS relevance FROM memories WHERE ${whereClause}
+           SELECT *, (${relevanceSql} + (
+             CASE WHEN EXISTS (
+               SELECT 1 FROM relationships r
+               WHERE (r.from_id = memories.id OR r.to_id = memories.id)
+                 AND (r.rel_type IN ('SOLVES', 'BUILDS_ON', 'REQUIRES', 'PREVENTS') OR r.strength >= 0.7)
+             ) THEN 1.0 ELSE 0.0 END
+           )) AS relevance FROM memories WHERE ${whereClause}
          ) ORDER BY relevance DESC, importance DESC, created_at DESC LIMIT ? OFFSET ?`
       )
       .all(...(boundParams as any[])) as Record<string, unknown>[];
@@ -539,7 +764,7 @@ export class SQLiteBackend implements GraphBackend {
     }
 
     const relationshipId = randomUUID();
-    const props = properties ?? createRelationshipProperties();
+    const props = createRelationshipProperties(properties);
 
     // Check both memories exist
     const fromExists = this.db.prepare("SELECT id FROM memories WHERE id = ?").get(fromMemoryId);
@@ -591,6 +816,127 @@ export class SQLiteBackend implements GraphBackend {
     const maxDepth = Math.max(1, Math.min(Number(opts?.maxDepth ?? 2) || 2, 10));
     const relTypes = opts?.relationshipTypes;
 
+    // For shallow traversals (maxDepth <= 2, covering standard agent recall), execute
+    // via single-query recursive CTE in SQLite C engine for sub-millisecond latency.
+    // For deeper traversals (maxDepth > 2), delegate to procedural BFS with a global
+    // visited Set to avoid combinatorial diamond-path replication on dense DAGs.
+    if (maxDepth > 2) {
+      return this._fallbackBfs(memoryId, opts);
+    }
+
+    try {
+      let relTypeFilter = "";
+      const relParams: unknown[] = [];
+
+      // Single-query multi-hop graph exploration via a recursive CTE (WITH RECURSIVE).
+      // Traverses incoming/outgoing relationships up to maxDepth directly within SQLite,
+      // orders results by depth and strength, deduplicates visited nodes, and constructs
+      // typed Memory and Relationship models, with fallback to iterative BFS on error.
+      if (relTypes && relTypes.length > 0) {
+        const placeholders = relTypes.map(() => "?").join(",");
+        relTypeFilter = `AND r.rel_type IN (${placeholders})`;
+        relParams.push(...relTypes);
+      }
+
+      // Single-query recursive BFS traversal in SQLite C engine with cycle tracking.
+      // Memory IDs in path segments are hex-encoded (hex(?)) to guarantee delimiter isolation:
+      // if an ID contains literal commas (e.g. "a,b"), raw comma concatenation produces ",root,a,b,"
+      // where a distinct child node "b" would falsely match instr(path, ",b,"). Hex encoding restricts
+      // path tokens strictly to [0-9A-F], eliminating delimiter collision.
+      const sql = `
+        WITH RECURSIVE traverse(mem_id, rel_id, depth, path) AS (
+          SELECT
+            CAST(? AS TEXT) AS mem_id,
+            CAST(NULL AS TEXT) AS rel_id,
+            0 AS depth,
+            ',' || hex(?) || ',' AS path
+
+          UNION
+
+          SELECT
+            CASE WHEN r.from_id = t.mem_id THEN r.to_id ELSE r.from_id END AS mem_id,
+            r.id AS rel_id,
+            t.depth + 1 AS depth,
+            t.path || hex(CASE WHEN r.from_id = t.mem_id THEN r.to_id ELSE r.from_id END) || ',' AS path
+          FROM relationships r
+          JOIN traverse t ON (r.from_id = t.mem_id OR r.to_id = t.mem_id)
+          WHERE t.depth < ?
+            AND instr(t.path, ',' || hex(CASE WHEN r.from_id = t.mem_id THEN r.to_id ELSE r.from_id END) || ',') = 0
+            ${relTypeFilter}
+        )
+        SELECT DISTINCT
+          t.depth,
+          r.id AS r_id, r.from_id, r.to_id, r.rel_type, r.strength, r.confidence AS r_confidence, r.context AS r_context,
+          r.evidence_count, r.valid_from, r.valid_until, r.recorded_at AS r_recorded_at, r.invalidated_by,
+          m.id, m.type, m.title, m.content, m.summary, m.tags, m.importance, m.confidence,
+          m.effectiveness, m.usage_count, m.created_at, m.updated_at, m.last_accessed, m.version,
+          m.updated_by, m.context
+        FROM traverse t
+        JOIN relationships r ON r.id = t.rel_id
+        JOIN memories m ON m.id = t.mem_id
+        WHERE t.depth > 0
+        ORDER BY t.depth ASC, r.strength DESC;
+      `;
+
+      const queryParams = [
+        memoryId, memoryId, maxDepth, ...relParams,
+      ];
+
+      const rows = this.db.prepare(sql).all(...(queryParams as any[])) as Record<string, unknown>[];
+      const results: [Memory, Relationship][] = [];
+      const seenNodes = new Set<string>([memoryId]);
+
+      for (const row of rows) {
+        const otherId = row["id"] as string;
+        if (seenNodes.has(otherId)) continue;
+        seenNodes.add(otherId);
+
+        const mem = rowToMemory(row);
+        if (!mem) continue;
+
+        const props = createRelationshipProperties({
+          strength: Number(row["strength"] ?? 0.5),
+          confidence: Number(row["r_confidence"] ?? 0.8),
+          context: (row["r_context"] as string) ?? undefined,
+          evidence_count: Number(row["evidence_count"] ?? 1),
+          valid_from: row["valid_from"] as string,
+          valid_until: (row["valid_until"] as string) ?? undefined,
+          recorded_at: row["r_recorded_at"] as string,
+          invalidated_by: (row["invalidated_by"] as string) ?? undefined,
+        });
+
+        const rel: Relationship = {
+          id: row["r_id"] as string,
+          from_memory_id: row["from_id"] as string,
+          to_memory_id: row["to_id"] as string,
+          type: row["rel_type"] as string,
+          properties: props,
+          description: undefined,
+          bidirectional: false,
+        };
+        results.push([mem, rel]);
+      }
+
+      // VAL-REVIEW-018: honor opts.limit when provided (Cypher backends cap
+      // at 20 by default); sqlite historically returned everything, so the
+      // default here remains uncapped for behavior parity.
+      if (opts?.limit !== undefined) {
+        return results.slice(0, Math.max(0, Math.trunc(opts.limit)));
+      }
+      return results;
+    } catch {
+      return this._fallbackBfs(memoryId, opts);
+    }
+  }
+
+  private async _fallbackBfs(
+    memoryId: string,
+    opts?: { relationshipTypes?: string[]; maxDepth?: number; limit?: number }
+  ): Promise<[Memory, Relationship][]> {
+    if (!this.db) throw new DatabaseConnectionError("Not connected");
+    const maxDepth = Math.max(1, Math.min(Number(opts?.maxDepth ?? 2) || 2, 10));
+    const relTypes = opts?.relationshipTypes;
+
     // For simplicity, do BFS up to maxDepth
     const visited = new Set<string>([memoryId]);
     const results: [Memory, Relationship][] = [];
@@ -608,6 +954,8 @@ export class SQLiteBackend implements GraphBackend {
           query += ` AND rel_type IN (${placeholders})`;
           params.push(...relTypes);
         }
+
+        query += " ORDER BY strength DESC";
 
         const rows = this.db.prepare(query).all(...(params as any[])) as unknown as RelRow[];
 

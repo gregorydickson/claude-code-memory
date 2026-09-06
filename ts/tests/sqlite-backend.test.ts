@@ -550,4 +550,167 @@ describe("SQLiteBackend search matching", () => {
     const miss = await db.searchMemories(searchQuery({ query: "of and the" }));
     expect(miss.length).toBe(0);
   });
+
+  test("bulkStoreMemories ingests memories in batch transaction", async () => {
+    const batch = [
+      createMemory({ type: "solution", title: "Batch Memory 1", content: "Content 1" }),
+      createMemory({ type: "solution", title: "Batch Memory 2", content: "Content 2" }),
+      createMemory({ type: "solution", title: "Batch Memory 3", content: "Content 3" }),
+    ];
+    const ids = await db.bulkStoreMemories(batch);
+    expect(ids.length).toBe(3);
+
+    const m1 = await db.getMemory(ids[0]);
+    expect(m1).not.toBeNull();
+    expect(m1?.title).toBe("Batch Memory 1");
+  });
+
+  test("FTS5 Porter stemming matches inflected words", async () => {
+    await db.storeMemory(
+      createMemory({
+        type: "solution",
+        title: "Ingress proxy rollout guide",
+        content: "Detailed instructions for handling connection termination.",
+      })
+    );
+
+    // "rollouts" (plural) matches "rollout" via Porter stemmer
+    const res1 = await db.searchMemories(searchQuery({ query: "rollouts" }));
+    expect(res1.length).toBeGreaterThan(0);
+    expect(res1[0].title).toBe("Ingress proxy rollout guide");
+
+    // "terminating" matches "termination" via Porter stemmer
+    const res2 = await db.searchMemories(searchQuery({ query: "terminating" }));
+    expect(res2.length).toBeGreaterThan(0);
+    expect(res2[0].title).toBe("Ingress proxy rollout guide");
+  });
+
+  test("getRelatedMemories traverses multi-hop graph via recursive CTE", async () => {
+    const m1 = await db.storeMemory(createMemory({ type: "problem", title: "Origin Problem", content: "Problem body" }));
+    const m2 = await db.storeMemory(createMemory({ type: "solution", title: "Intermediate Solution", content: "Solution body" }));
+    const m3 = await db.storeMemory(createMemory({ type: "fix", title: "Deep Fix", content: "Fix body" }));
+
+    await db.createRelationship(m2, m1, "SOLVES");
+    await db.createRelationship(m3, m2, "BUILDS_ON");
+
+    // 1-hop traversal
+    const hop1 = await db.getRelatedMemories(m1, { maxDepth: 1 });
+    expect(hop1.length).toBe(1);
+    expect(hop1[0][0].title).toBe("Intermediate Solution");
+
+    // 2-hop recursive traversal
+    const hop2 = await db.getRelatedMemories(m1, { maxDepth: 2 });
+    expect(hop2.length).toBe(2);
+    const titles = hop2.map((h) => h[0].title);
+    expect(titles).toContain("Intermediate Solution");
+    expect(titles).toContain("Deep Fix");
+  });
+
+  test("getRelatedMemories handles dense cyclic graphs with maxDepth > 2 without path explosion", async () => {
+    // Construct a cycle: A -> B -> C -> D -> B
+    const a = await db.storeMemory(createMemory({ type: "problem", title: "Node A", content: "A" }));
+    const b = await db.storeMemory(createMemory({ type: "solution", title: "Node B", content: "B" }));
+    const c = await db.storeMemory(createMemory({ type: "solution", title: "Node C", content: "C" }));
+    const d = await db.storeMemory(createMemory({ type: "solution", title: "Node D", content: "D" }));
+
+    await db.createRelationship(a, b, "SOLVES");
+    await db.createRelationship(b, c, "BUILDS_ON");
+    await db.createRelationship(c, d, "REQUIRES");
+    await db.createRelationship(d, b, "SOLVES"); // cycle back to B
+
+    const related = await db.getRelatedMemories(a, { maxDepth: 4 });
+    // Expected to reach B, C, D without duplicates or infinite loop
+    expect(related.length).toBe(3);
+    const relatedTitles = related.map((r) => r[0].title);
+    expect(relatedTitles).toContain("Node B");
+    expect(relatedTitles).toContain("Node C");
+    expect(relatedTitles).toContain("Node D");
+  });
+
+  test("getRelatedMemories preserves relationship confidence distinct from target memory confidence", async () => {
+    const p = await db.storeMemory(createMemory({ type: "problem", title: "Base Problem", content: "P", confidence: 0.95 }));
+    const s = await db.storeMemory(createMemory({ type: "solution", title: "Specific Solution", content: "S", confidence: 0.95 }));
+
+    // Relationship has distinct lower confidence (0.35)
+    await db.createRelationship(s, p, "SOLVES", { confidence: 0.35, strength: 0.8 });
+
+    const related = await db.getRelatedMemories(p, { maxDepth: 1 });
+    expect(related.length).toBe(1);
+    const [mem, rel] = related[0];
+    expect(mem.title).toBe("Specific Solution");
+    expect(mem.confidence).toBe(0.95);
+    expect(rel.properties.confidence).toBe(0.35);
+  });
+
+  test("bulkStoreMemories and storeMemory accept partial memory objects with missing optional/default fields", async () => {
+    // Partial memory object omitting tags, importance, confidence, created_at, version, usage_count
+    const partial1 = {
+      type: "solution",
+      title: "Partial Memory 1",
+      content: "Content with missing defaults",
+    } as any;
+
+    const partial2 = {
+      type: "problem",
+      title: "Partial Memory 2",
+      content: "Content 2 with missing defaults",
+    } as any;
+
+    const ids = await db.bulkStoreMemories([partial1, partial2]);
+    expect(ids.length).toBe(2);
+
+    const fetched = await db.getMemory(ids[0]);
+    expect(fetched).not.toBeNull();
+    expect(fetched!.title).toBe("Partial Memory 1");
+    expect(fetched!.tags).toEqual([]);
+    expect(fetched!.importance).toBe(0.5);
+    expect(fetched!.confidence).toBe(0.8);
+    expect(fetched!.usage_count).toBe(0);
+    expect(fetched!.version).toBe(1);
+
+    // Single storeMemory with partial object
+    const singleId = await db.storeMemory({
+      type: "fix",
+      title: "Single Partial",
+      content: "Single partial body",
+    } as any);
+    expect(singleId).toBeDefined();
+    const fetchedSingle = await db.getMemory(singleId);
+    expect(fetchedSingle).not.toBeNull();
+    expect(fetchedSingle!.tags).toEqual([]);
+  });
+
+  test("_fallbackBfs prioritizes highest strength relationship when multiple edges connect to same node", async () => {
+    const root = await db.storeMemory(createMemory({ type: "problem", title: "BFS Root", content: "Root" }));
+    const mid = await db.storeMemory(createMemory({ type: "solution", title: "BFS Mid", content: "Mid" }));
+    const target = await db.storeMemory(createMemory({ type: "solution", title: "BFS Target", content: "Target" }));
+
+    await db.createRelationship(root, mid, "REQUIRES", { strength: 0.9 });
+    // Two relationships between mid and target: weak one created first, strong one second
+    await db.createRelationship(mid, target, "RELATED_TO", { strength: 0.2 });
+    await db.createRelationship(mid, target, "SOLVES", { strength: 0.95 });
+
+    // maxDepth = 3 triggers _fallbackBfs
+    const related = await db.getRelatedMemories(root, { maxDepth: 3 });
+    const targetTuple = related.find(([m]) => m.title === "BFS Target");
+    expect(targetTuple).toBeDefined();
+    expect(targetTuple![1].properties.strength).toBe(0.95);
+  });
+
+  test("getRelatedMemories CTE handles memory IDs containing commas without false cycle drop", async () => {
+    // Construct root -> "a,b" -> "b"
+    const root = await db.storeMemory(createMemory({ id: "root-comma-test", type: "problem", title: "Comma Root", content: "Root" }));
+    const commaNode = await db.storeMemory(createMemory({ id: "a,b", type: "solution", title: "Node Comma", content: "A comma B" }));
+    const subNode = await db.storeMemory(createMemory({ id: "b", type: "solution", title: "Node B", content: "Just B" }));
+
+    await db.createRelationship(root, commaNode, "SOLVES");
+    await db.createRelationship(commaNode, subNode, "BUILDS_ON");
+
+    // maxDepth = 2 executes single-query recursive CTE
+    const related = await db.getRelatedMemories(root, { maxDepth: 2 });
+    expect(related.length).toBe(2);
+    const ids = related.map(([m]) => m.id);
+    expect(ids).toContain("a,b");
+    expect(ids).toContain("b");
+  });
 });

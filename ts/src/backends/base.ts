@@ -45,6 +45,7 @@ export interface GraphBackend {
 
   // Memory CRUD
   storeMemory(memory: Memory): Promise<string>;
+  bulkStoreMemories?(memories: Memory[]): Promise<string[]>;
   getMemory(memoryId: string, includeRelationships?: boolean): Promise<Memory | null>;
   searchMemories(searchQuery: SearchQuery): Promise<Memory[]>;
   updateMemory(memory: Memory): Promise<boolean>;
