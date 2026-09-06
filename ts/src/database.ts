@@ -54,6 +54,7 @@ export interface IMemoryDatabase {
   initializeSchema(): Promise<void>;
   close(): Promise<void>;
   storeMemory(memory: Memory): Promise<string>;
+  bulkStoreMemories?(memories: Memory[]): Promise<string[]>;
   getMemory(memoryId: string, includeRelationships?: boolean): Promise<Memory | null>;
   searchMemories(searchQuery: SearchQuery): Promise<Memory[]>;
   searchMemoriesPaginated?(searchQuery: SearchQuery): Promise<PaginatedResult>;
@@ -108,6 +109,17 @@ export class MemoryDatabase implements IMemoryDatabase {
 
   async storeMemory(memory: Memory): Promise<string> {
     return this.backend.storeMemory(memory);
+  }
+
+  async bulkStoreMemories(memories: Memory[]): Promise<string[]> {
+    if (typeof this.backend.bulkStoreMemories === "function") {
+      return this.backend.bulkStoreMemories(memories);
+    }
+    const ids: string[] = [];
+    for (const m of memories) {
+      ids.push(await this.backend.storeMemory(m));
+    }
+    return ids;
   }
 
   async getMemory(memoryId: string, includeRelationships = true): Promise<Memory | null> {

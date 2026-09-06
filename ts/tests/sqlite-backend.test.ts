@@ -550,4 +550,59 @@ describe("SQLiteBackend search matching", () => {
     const miss = await db.searchMemories(searchQuery({ query: "of and the" }));
     expect(miss.length).toBe(0);
   });
+
+  test("bulkStoreMemories ingests memories in batch transaction", async () => {
+    const batch = [
+      createMemory({ type: "solution", title: "Batch Memory 1", content: "Content 1" }),
+      createMemory({ type: "solution", title: "Batch Memory 2", content: "Content 2" }),
+      createMemory({ type: "solution", title: "Batch Memory 3", content: "Content 3" }),
+    ];
+    const ids = await db.bulkStoreMemories(batch);
+    expect(ids.length).toBe(3);
+
+    const m1 = await db.getMemory(ids[0]);
+    expect(m1).not.toBeNull();
+    expect(m1?.title).toBe("Batch Memory 1");
+  });
+
+  test("FTS5 Porter stemming matches inflected words", async () => {
+    await db.storeMemory(
+      createMemory({
+        type: "solution",
+        title: "Ingress proxy rollout guide",
+        content: "Detailed instructions for handling connection termination.",
+      })
+    );
+
+    // "rollouts" (plural) matches "rollout" via Porter stemmer
+    const res1 = await db.searchMemories(searchQuery({ query: "rollouts" }));
+    expect(res1.length).toBeGreaterThan(0);
+    expect(res1[0].title).toBe("Ingress proxy rollout guide");
+
+    // "terminating" matches "termination" via Porter stemmer
+    const res2 = await db.searchMemories(searchQuery({ query: "terminating" }));
+    expect(res2.length).toBeGreaterThan(0);
+    expect(res2[0].title).toBe("Ingress proxy rollout guide");
+  });
+
+  test("getRelatedMemories traverses multi-hop graph via recursive CTE", async () => {
+    const m1 = await db.storeMemory(createMemory({ type: "problem", title: "Origin Problem", content: "Problem body" }));
+    const m2 = await db.storeMemory(createMemory({ type: "solution", title: "Intermediate Solution", content: "Solution body" }));
+    const m3 = await db.storeMemory(createMemory({ type: "fix", title: "Deep Fix", content: "Fix body" }));
+
+    await db.createRelationship(m2, m1, "SOLVES");
+    await db.createRelationship(m3, m2, "BUILDS_ON");
+
+    // 1-hop traversal
+    const hop1 = await db.getRelatedMemories(m1, { maxDepth: 1 });
+    expect(hop1.length).toBe(1);
+    expect(hop1[0][0].title).toBe("Intermediate Solution");
+
+    // 2-hop recursive traversal
+    const hop2 = await db.getRelatedMemories(m1, { maxDepth: 2 });
+    expect(hop2.length).toBe(2);
+    const titles = hop2.map((h) => h[0].title);
+    expect(titles).toContain("Intermediate Solution");
+    expect(titles).toContain("Deep Fix");
+  });
 });
