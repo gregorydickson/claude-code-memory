@@ -641,4 +641,59 @@ describe("SQLiteBackend search matching", () => {
     expect(mem.confidence).toBe(0.95);
     expect(rel.properties.confidence).toBe(0.35);
   });
+
+  test("bulkStoreMemories and storeMemory accept partial memory objects with missing optional/default fields", async () => {
+    // Partial memory object omitting tags, importance, confidence, created_at, version, usage_count
+    const partial1 = {
+      type: "solution",
+      title: "Partial Memory 1",
+      content: "Content with missing defaults",
+    } as any;
+
+    const partial2 = {
+      type: "problem",
+      title: "Partial Memory 2",
+      content: "Content 2 with missing defaults",
+    } as any;
+
+    const ids = await db.bulkStoreMemories([partial1, partial2]);
+    expect(ids.length).toBe(2);
+
+    const fetched = await db.getMemory(ids[0]);
+    expect(fetched).not.toBeNull();
+    expect(fetched!.title).toBe("Partial Memory 1");
+    expect(fetched!.tags).toEqual([]);
+    expect(fetched!.importance).toBe(0.5);
+    expect(fetched!.confidence).toBe(0.8);
+    expect(fetched!.usage_count).toBe(0);
+    expect(fetched!.version).toBe(1);
+
+    // Single storeMemory with partial object
+    const singleId = await db.storeMemory({
+      type: "fix",
+      title: "Single Partial",
+      content: "Single partial body",
+    } as any);
+    expect(singleId).toBeDefined();
+    const fetchedSingle = await db.getMemory(singleId);
+    expect(fetchedSingle).not.toBeNull();
+    expect(fetchedSingle!.tags).toEqual([]);
+  });
+
+  test("_fallbackBfs prioritizes highest strength relationship when multiple edges connect to same node", async () => {
+    const root = await db.storeMemory(createMemory({ type: "problem", title: "BFS Root", content: "Root" }));
+    const mid = await db.storeMemory(createMemory({ type: "solution", title: "BFS Mid", content: "Mid" }));
+    const target = await db.storeMemory(createMemory({ type: "solution", title: "BFS Target", content: "Target" }));
+
+    await db.createRelationship(root, mid, "REQUIRES", { strength: 0.9 });
+    // Two relationships between mid and target: weak one created first, strong one second
+    await db.createRelationship(mid, target, "RELATED_TO", { strength: 0.2 });
+    await db.createRelationship(mid, target, "SOLVES", { strength: 0.95 });
+
+    // maxDepth = 3 triggers _fallbackBfs
+    const related = await db.getRelatedMemories(root, { maxDepth: 3 });
+    const targetTuple = related.find(([m]) => m.title === "BFS Target");
+    expect(targetTuple).toBeDefined();
+    expect(targetTuple![1].properties.strength).toBe(0.95);
+  });
 });

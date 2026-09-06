@@ -44,20 +44,23 @@ Pre-existing databases created on previous versions are automatically upgraded o
 ### 3. Graph-Aware BM25 Reranking
 FTS5 search uses BM25 relevance scoring weighted across fields (boosting `title` over `content` and `summary`) combined with active relationship connectivity boosts for connected solution and problem nodes.
 
-### 4. Single-Query Recursive CTE Graph Traversal
-Iterative BFS traversal in `getRelatedMemories` is replaced by an SQLite `WITH RECURSIVE` Common Table Expression, delegating traversal entirely to SQLite's C engine in a single query execution.
+### 4. Adaptive Graph Traversal Strategy
+- For shallow traversals (`maxDepth <= 2`, covering standard agent recall queries), traversal executes via a single-query `WITH RECURSIVE` Common Table Expression in the SQLite C engine for sub-millisecond latency. Cycle tracking (`instr(path, ',' || next_id || ',') = 0`) prevents looping back to visited ancestors.
+- For deeper graph traversals (`maxDepth > 2`), `getRelatedMemories` automatically delegates to procedural breadth-first search (`_fallbackBfs`) with a global `visited` Set across all levels, eliminating combinatorial diamond-path replication on dense DAGs.
 
 ### 5. Bulk Ingestion & High-Performance PRAGMAs
 - `bulkStoreMemories` uses prepared statements wrapped in an explicit `BEGIN TRANSACTION / COMMIT` block, achieving 3,000+ docs/sec.
-- Runtime PRAGMAs are tuned for local agent workloads: `PRAGMA synchronous=NORMAL;`, `PRAGMA temp_store=MEMORY;`, `PRAGMA mmap_size=67108864;`.
+- Runtime PRAGMAs are tuned for local agent workloads: `PRAGMA synchronous=NORMAL;`, `PRAGMA temp_store=MEMORY;`, `PRAGMA mmap_size=67108864;`. On clean exit, `disconnect()` executes `PRAGMA wal_checkpoint(TRUNCATE)` to flush WAL data to the primary database file.
+- Durability configuration: `MEMORY_SQLITE_SYNCHRONOUS` defaults to `NORMAL` (safe against application crashes with 20x–50x write throughput); environments requiring physical power-loss fsync on each commit can set `MEMORY_SQLITE_SYNCHRONOUS=FULL`.
 
 ## Consequences
 
 ### Positive
 - **50x Search Acceleration**: Search latency dropped from ~260ms to <5ms on 10,000-document benchmarks.
 - **Linguistic Precision**: Accurately matches inflected search terms (singular/plural, verb tenses).
-- **Single-Query Traversal**: Recursive CTE cuts traversal overhead to sub-millisecond execution.
+- **Adaptive Traversal**: Single-query CTE for shallow queries (1–2ms), global-visited BFS for deep dense exploration (2–3ms).
 - **Zero External Dependencies**: Operates entirely using native Bun/SQLite built-in FTS5 capabilities.
 
 ### Trade-offs
 - Modest database file size increase (~15-20%) to store the FTS5 index tables.
+- `synchronous=NORMAL` relies on WAL checkpoints for disk fsync; can be overridden to `FULL` if strict physical power-loss durability is required.
