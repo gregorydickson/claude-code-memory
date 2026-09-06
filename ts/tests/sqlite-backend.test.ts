@@ -696,4 +696,21 @@ describe("SQLiteBackend search matching", () => {
     expect(targetTuple).toBeDefined();
     expect(targetTuple![1].properties.strength).toBe(0.95);
   });
+
+  test("getRelatedMemories CTE handles memory IDs containing commas without false cycle drop", async () => {
+    // Construct root -> "a,b" -> "b"
+    const root = await db.storeMemory(createMemory({ id: "root-comma-test", type: "problem", title: "Comma Root", content: "Root" }));
+    const commaNode = await db.storeMemory(createMemory({ id: "a,b", type: "solution", title: "Node Comma", content: "A comma B" }));
+    const subNode = await db.storeMemory(createMemory({ id: "b", type: "solution", title: "Node B", content: "Just B" }));
+
+    await db.createRelationship(root, commaNode, "SOLVES");
+    await db.createRelationship(commaNode, subNode, "BUILDS_ON");
+
+    // maxDepth = 2 executes single-query recursive CTE
+    const related = await db.getRelatedMemories(root, { maxDepth: 2 });
+    expect(related.length).toBe(2);
+    const ids = related.map(([m]) => m.id);
+    expect(ids).toContain("a,b");
+    expect(ids).toContain("b");
+  });
 });

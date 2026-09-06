@@ -838,14 +838,18 @@ export class SQLiteBackend implements GraphBackend {
         relParams.push(...relTypes);
       }
 
-      // Single-query recursive BFS traversal in SQLite C engine with cycle tracking
+      // Single-query recursive BFS traversal in SQLite C engine with cycle tracking.
+      // Memory IDs in path segments are hex-encoded (hex(?)) to guarantee delimiter isolation:
+      // if an ID contains literal commas (e.g. "a,b"), raw comma concatenation produces ",root,a,b,"
+      // where a distinct child node "b" would falsely match instr(path, ",b,"). Hex encoding restricts
+      // path tokens strictly to [0-9A-F], eliminating delimiter collision.
       const sql = `
         WITH RECURSIVE traverse(mem_id, rel_id, depth, path) AS (
           SELECT
             CAST(? AS TEXT) AS mem_id,
             CAST(NULL AS TEXT) AS rel_id,
             0 AS depth,
-            ',' || ? || ',' AS path
+            ',' || hex(?) || ',' AS path
 
           UNION
 
@@ -853,11 +857,11 @@ export class SQLiteBackend implements GraphBackend {
             CASE WHEN r.from_id = t.mem_id THEN r.to_id ELSE r.from_id END AS mem_id,
             r.id AS rel_id,
             t.depth + 1 AS depth,
-            t.path || (CASE WHEN r.from_id = t.mem_id THEN r.to_id ELSE r.from_id END) || ',' AS path
+            t.path || hex(CASE WHEN r.from_id = t.mem_id THEN r.to_id ELSE r.from_id END) || ',' AS path
           FROM relationships r
           JOIN traverse t ON (r.from_id = t.mem_id OR r.to_id = t.mem_id)
           WHERE t.depth < ?
-            AND instr(t.path, ',' || (CASE WHEN r.from_id = t.mem_id THEN r.to_id ELSE r.from_id END) || ',') = 0
+            AND instr(t.path, ',' || hex(CASE WHEN r.from_id = t.mem_id THEN r.to_id ELSE r.from_id END) || ',') = 0
             ${relTypeFilter}
         )
         SELECT DISTINCT
